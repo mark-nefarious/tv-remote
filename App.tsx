@@ -243,7 +243,8 @@ function RemoteScreen({
 
   const { width } = useWindowDimensions();
   // Ring + two rockers + gaps must fit the screen width (18 padding each side).
-  const ring = Math.max(150, Math.min(196, width - 36 - 2 * 58 - 2 * 8));
+  // Keep at least 20px of breathing room between each rocker and the wheel.
+  const ring = Math.max(140, Math.min(184, width - 36 - 2 * 54 - 2 * 20));
 
   const sendText = () => {
     if (!text) return;
@@ -539,12 +540,12 @@ const s = StyleSheet.create({
   },
   btnText: { color: C.text, fontSize: 15, fontWeight: '600' },
 
-  thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 20 },
   ring: { backgroundColor: C.btn },
   dZone: { position: 'absolute', flex: 0, backgroundColor: 'transparent' },
   ok: { position: 'absolute', flex: 0, backgroundColor: '#2A2D36' },
 
-  rocker: { width: 58, backgroundColor: '#3A3D45', borderRadius: 18, overflow: 'hidden' },
+  rocker: { width: 54, backgroundColor: '#3A3D45', borderRadius: 18, overflow: 'hidden' },
   rockBtn: { flex: 1, backgroundColor: 'transparent', borderRadius: 0 },
   rockMid: { flex: 0, height: 34, backgroundColor: 'transparent', borderRadius: 0 },
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
