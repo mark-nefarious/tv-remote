@@ -132,6 +132,7 @@ function RemoteScreen({
   const [apps, setApps] = useState<TvApp[]>([]);
   const [text, setText] = useState('');
   const [waking, setWaking] = useState(false);
+  const [showColours, setShowColours] = useState(false);
   const tvRef = useRef<SamsungTv | null>(null);
   const tvDataRef = useRef(tv);
   tvDataRef.current = tv;
@@ -196,115 +197,163 @@ function RemoteScreen({
   }[status];
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={s.remote} keyboardShouldPersistTaps="handled">
-        {/* Header */}
-        <View style={s.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={s.tvName} numberOfLines={1}>
-              {tv.name}
-            </Text>
-            <Pressable onPress={() => tvRef.current?.connect()} style={s.statusRow}>
-              <View style={[s.dot, { backgroundColor: statusInfo.color }]} />
-              <Text style={s.statusText}>{statusInfo.label}</Text>
-            </Pressable>
-          </View>
-          <Pressable onLongPress={onForget} hitSlop={10}>
-            <Text style={s.forget}>Hold to change TV</Text>
-          </Pressable>
-        </View>
-
-        {status === 'denied' && (
-          <Text style={[s.p, { color: C.red }]}>
-            On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device
-            List. Allow this phone, then tap the status above.
+    <View style={s.remote}>
+      {/* ---- Top: rarely used ---- */}
+      <View style={s.header}>
+        <Pressable style={{ flex: 1 }} onPress={() => tvRef.current?.connect()} onLongPress={onForget}>
+          <Text style={s.tvName} numberOfLines={1}>
+            {tv.name}
           </Text>
-        )}
+          <View style={s.statusRow}>
+            <View style={[s.dot, { backgroundColor: statusInfo.color }]} />
+            <Text style={s.statusText}>{statusInfo.label}</Text>
+          </View>
+        </Pressable>
+        <Btn label={waking ? '…' : '⏻'} onPress={power} color={C.red} style={s.power} big />
+      </View>
 
-        {/* Top row */}
+      {status === 'denied' && (
+        <Text style={[s.p, { color: C.red }]}>
+          On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device List.
+          Allow this phone, then tap the TV name.
+        </Text>
+      )}
+
+      <View style={s.row}>
+        <Btn label="Source" onPress={() => key('KEY_SOURCE')} style={s.small} />
+        <Btn label="123" onPress={() => key('KEY_MORE')} style={s.small} />
+        <Btn label="● ● ● ●" onPress={() => setShowColours((v) => !v)} style={s.small} />
+      </View>
+
+      {showColours && (
         <View style={s.row}>
-          <Btn label={waking ? '…' : '⏻'} onPress={power} color={C.red} big />
-          <Btn label="Source" onPress={() => key('KEY_SOURCE')} />
-          <Btn label="Mute" onPress={() => key('KEY_MUTE')} />
+          {[
+            ['KEY_RED', C.red],
+            ['KEY_GREEN', C.green],
+            ['KEY_YELLOW', C.amber],
+            ['KEY_CYAN', C.accent],
+          ].map(([k, col]) => (
+            <Btn key={k} label="" onPress={() => key(k)} style={[s.small, { backgroundColor: col }]} />
+          ))}
         </View>
+      )}
 
-        {/* D-pad */}
-        <View style={s.dpad}>
-          <Btn label="▲" onPress={() => key('KEY_UP')} repeat style={[s.dBtn, s.dUp]} />
-          <View style={s.dMid}>
-            <Btn label="◀" onPress={() => key('KEY_LEFT')} repeat style={s.dBtn} />
-            <Btn label="OK" onPress={() => key('KEY_ENTER')} style={s.ok} />
-            <Btn label="▶" onPress={() => key('KEY_RIGHT')} repeat style={s.dBtn} />
-          </View>
-          <Btn label="▼" onPress={() => key('KEY_DOWN')} repeat style={[s.dBtn, s.dUp]} />
-        </View>
+      {apps.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 8 }}
+          style={{ flexGrow: 0 }}
+        >
+          {sortApps(apps).map((a) => (
+            <Pressable
+              key={a.appId}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                tvRef.current?.launchApp(a);
+              }}
+              style={({ pressed }) => [s.chip, pressed && { backgroundColor: C.btnPressed }]}
+            >
+              <Text style={s.chipText}>{a.name}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
 
-        <View style={s.row}>
-          <Btn label="Back" onPress={() => key('KEY_RETURN')} />
-          <Btn label="Home" onPress={() => key('KEY_HOME')} />
-          <Btn label="⏯" onPress={() => key('KEY_PLAY_BACK')} />
-        </View>
-
-        {/* Volume / channel rockers */}
-        <View style={s.row}>
-          <View style={s.rocker}>
-            <Btn label="+" onPress={() => key('KEY_VOLUP')} repeat style={s.rockBtn} />
-            <Text style={s.rockLabel}>VOL</Text>
-            <Btn label="−" onPress={() => key('KEY_VOLDOWN')} repeat style={s.rockBtn} />
-          </View>
-          <View style={s.rocker}>
-            <Btn label="⏪" onPress={() => key('KEY_REWIND')} style={s.rockBtn} />
-            <Btn label="⏩" onPress={() => key('KEY_FF')} style={s.rockBtn} />
-          </View>
-          <View style={s.rocker}>
-            <Btn label="︿" onPress={() => key('KEY_CHUP')} repeat style={s.rockBtn} />
-            <Text style={s.rockLabel}>CH</Text>
-            <Btn label="﹀" onPress={() => key('KEY_CHDOWN')} repeat style={s.rockBtn} />
-          </View>
-        </View>
-
-        {/* Apps */}
-        {apps.length > 0 && (
-          <>
-            <Text style={s.section}>Apps</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-              {apps.map((a) => (
-                <Pressable
-                  key={a.appId}
-                  onPress={() => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    tvRef.current?.launchApp(a);
-                  }}
-                  style={({ pressed }) => [s.chip, pressed && { backgroundColor: C.btnPressed }]}
-                >
-                  <Text style={s.chipText}>{a.name}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-          </>
-        )}
-
-        {/* Keyboard */}
-        <Text style={s.section}>Type on TV</Text>
-        <View style={s.typeRow}>
-          <TextInput
-            value={text}
-            onChangeText={setText}
-            placeholder="Open a search box on the TV first"
-            placeholderTextColor={C.dim}
-            style={[s.input, { flex: 1, marginBottom: 0 }]}
-            onSubmitEditing={sendText}
-            returnKeyType="send"
-          />
+      <View style={s.typeRow}>
+        <TextInput
+          value={text}
+          onChangeText={setText}
+          placeholder="Type on TV…"
+          placeholderTextColor={C.dim}
+          style={[s.input, { flex: 1, marginBottom: 0, paddingVertical: 10, fontSize: 15 }]}
+          onSubmitEditing={sendText}
+          returnKeyType="send"
+        />
+        {!!text && (
           <Pressable style={s.send} onPress={sendText}>
             <Text style={s.primaryText}>Send</Text>
           </Pressable>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        )}
+      </View>
+
+      {/* ---- Bottom: thumb zone ---- */}
+      <View style={{ flex: 1 }} />
+
+      <View style={s.thumb}>
+        <Rocker
+          up={() => key('KEY_VOLUP')}
+          down={() => key('KEY_VOLDOWN')}
+          mid={() => key('KEY_MUTE')}
+          upLabel="+"
+          downLabel="−"
+          midLabel="VOL"
+        />
+        <DPad onKey={key} />
+        <Rocker
+          up={() => key('KEY_CHUP')}
+          down={() => key('KEY_CHDOWN')}
+          mid={() => key('KEY_CH_LIST')}
+          upLabel="︿"
+          downLabel="﹀"
+          midLabel="CH"
+        />
+      </View>
+
+      <View style={s.row}>
+        <Btn label="↩" onPress={() => key('KEY_RETURN')} big />
+        <Btn label="⌂" onPress={() => key('KEY_HOME')} big />
+        <Btn label="⏯" onPress={() => key('KEY_PLAY_BACK')} big />
+      </View>
+    </View>
   );
 }
 
+const FAVOURITES = ['Netflix', 'Prime Video', 'YouTube', 'TVNZ+', 'ThreeNow', 'Disney+'];
+function sortApps(apps: TvApp[]) {
+  const rank = (a: TvApp) => {
+    const i = FAVOURITES.findIndex((f) => a.name.toLowerCase().includes(f.toLowerCase()));
+    return i === -1 ? 99 : i;
+  };
+  return [...apps].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}
+
+/* ---------------- D-pad ---------------- */
+
+const RING = 196;
+function DPad({ onKey }: { onKey: (k: string) => void }) {
+  const zone = (k: string, label: string, pos: object) => (
+    <Btn label={label} onPress={() => onKey(k)} repeat style={[s.dZone, pos]} textStyle={{ color: C.dim }} />
+  );
+  return (
+    <View style={s.ring}>
+      {zone('KEY_UP', '▲', { top: 0, left: RING / 2 - 34 })}
+      {zone('KEY_DOWN', '▼', { bottom: 0, left: RING / 2 - 34 })}
+      {zone('KEY_LEFT', '◀', { left: 0, top: RING / 2 - 34 })}
+      {zone('KEY_RIGHT', '▶', { right: 0, top: RING / 2 - 34 })}
+      <Btn label="OK" onPress={() => onKey('KEY_ENTER')} style={s.ok} />
+    </View>
+  );
+}
+
+/* ---------------- Rocker ---------------- */
+
+function Rocker(p: {
+  up: () => void;
+  down: () => void;
+  mid: () => void;
+  upLabel: string;
+  downLabel: string;
+  midLabel: string;
+}) {
+  return (
+    <View style={s.rocker}>
+      <Btn label={p.upLabel} onPress={p.up} repeat style={s.rockBtn} big />
+      <Btn label={p.midLabel} onPress={p.mid} style={s.rockMid} textStyle={s.rockLabel} />
+      <Btn label={p.downLabel} onPress={p.down} repeat style={s.rockBtn} big />
+    </View>
+  );
+}
 /* ---------------- Button ---------------- */
 
 function Btn({
@@ -314,6 +363,7 @@ function Btn({
   big,
   color,
   style,
+  textStyle,
 }: {
   label: string;
   onPress: () => void;
@@ -321,6 +371,7 @@ function Btn({
   big?: boolean;
   color?: string;
   style?: any;
+  textStyle?: any;
 }) {
   const delay = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interval = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -342,7 +393,7 @@ function Btn({
       onPressOut={stop}
       style={({ pressed }) => [s.btn, style, pressed && { backgroundColor: C.btnPressed }]}
     >
-      <Text style={[s.btnText, big && { fontSize: 24 }, color && { color }]}>{label}</Text>
+      <Text style={[s.btnText, big && { fontSize: 24 }, color && { color }, textStyle]}>{label}</Text>
     </Pressable>
   );
 }
@@ -366,15 +417,16 @@ const s = StyleSheet.create({
   primary: { backgroundColor: C.accent, borderRadius: 12, paddingVertical: 16, alignItems: 'center' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
-  remote: { padding: 20, gap: 18 },
-  header: { flexDirection: 'row', alignItems: 'center' },
-  tvName: { color: C.text, fontSize: 20, fontWeight: '700' },
+  remote: { flex: 1, paddingHorizontal: 18, paddingTop: 12, paddingBottom: 16, gap: 12 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  tvName: { color: C.text, fontSize: 18, fontWeight: '700' },
   statusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   statusText: { color: C.dim, fontSize: 13 },
-  forget: { color: C.dim, fontSize: 12 },
+  power: { flex: 0, width: 48, height: 48, borderRadius: 24 },
+  small: { height: 40, borderRadius: 12 },
 
-  row: { flexDirection: 'row', gap: 12, justifyContent: 'space-between' },
+  row: { flexDirection: 'row', gap: 10, justifyContent: 'space-between' },
   btn: {
     flex: 1,
     backgroundColor: C.btn,
@@ -383,16 +435,25 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnText: { color: C.text, fontSize: 16, fontWeight: '600' },
+  btnText: { color: C.text, fontSize: 15, fontWeight: '600' },
 
-  dpad: { alignItems: 'center', gap: 8 },
-  dMid: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  dBtn: { flex: 0, width: 76, height: 76, borderRadius: 38 },
-  dUp: { width: 76 },
-  ok: { flex: 0, width: 96, height: 96, borderRadius: 48, backgroundColor: '#262A33' },
+  thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  ring: { width: RING, height: RING, borderRadius: RING / 2, backgroundColor: C.btn },
+  dZone: { position: 'absolute', flex: 0, width: 68, height: 68, borderRadius: 34, backgroundColor: 'transparent' },
+  ok: {
+    position: 'absolute',
+    flex: 0,
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    top: RING / 2 - 46,
+    left: RING / 2 - 46,
+    backgroundColor: '#2A2D36',
+  },
 
-  rocker: { flex: 1, backgroundColor: C.btn, borderRadius: 18, alignItems: 'center', paddingVertical: 4 },
-  rockBtn: { flex: 0, width: '100%', backgroundColor: 'transparent', height: 52 },
+  rocker: { width: 58, height: RING, backgroundColor: '#3A3D45', borderRadius: 18, overflow: 'hidden' },
+  rockBtn: { flex: 1, backgroundColor: 'transparent', borderRadius: 0 },
+  rockMid: { flex: 0, height: 34, backgroundColor: 'transparent', borderRadius: 0 },
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
   section: { color: C.dim, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
