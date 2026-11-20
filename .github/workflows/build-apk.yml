@@ -3,14 +3,23 @@ name: Build APK
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Monotonic versionCode so each APK is a strict upgrade of the last.
+      VERSION_CODE: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +37,17 @@ jobs:
 
       - run: npm ci
 
+      - name: Typecheck
+        run: npx tsc --noEmit
+
       - name: Generate Android project
         run: npx expo prebuild -p android --no-install
+
+      - name: Check release signing key is stable
+        # Updates only install over each other if every build is signed with the same key.
+        run: |
+          grep -q "storeFile file('debug.keystore')" android/app/build.gradle
+          test -f android/app/debug.keystore
 
       - name: Build release APK
         working-directory: android
@@ -37,7 +55,16 @@ jobs:
 
       - run: cp android/app/build/outputs/apk/release/app-release.apk tv-remote.apk
 
-      - uses: softprops/action-gh-release@v2
+      # PRs: downloadable artifact for testing before merge. No release.
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tv-remote-pr${{ github.event.pull_request.number }}-build${{ github.run_number }}
+          path: tv-remote.apk
+          retention-days: 14
+
+      - if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: TV Remote build ${{ github.run_number }}

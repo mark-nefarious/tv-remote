@@ -11,6 +11,8 @@ Every push to `main` builds the APK on GitHub Actions (about 10 minutes) and pub
 
 To rebuild without changing code: Actions › Build APK › Run workflow.
 
+Pull requests also build. Open the PR's workflow run and download the APK from **Artifacts** to test before merging. Each build's versionCode is the workflow run number, so new builds install over old ones.
+
 ## First use
 
 1. On the TV, enable Settings › Connection › Network › Expert Settings › **Power On with Mobile**.
@@ -32,3 +34,4 @@ Tip: reserve the TV's IP in your router (DHCP reservation) so it never changes.
 - **"TV blocked this phone"**: go to Settings › Connection › External Device Manager › Device Connection Manager › Device List and allow it.
 - **Power on does nothing**: check Power On with Mobile is enabled. Some models only wake over Wi-Fi within a few hours of being turned off.
 - **Typing does nothing**: a text field must be open on the TV first.
+- **A shortcut is greyed out**: the TV didn't list that app. Netflix falls back to its known app ID. Stremio has no native Samsung app (it runs inside TizenBrew), so its button stays grey.

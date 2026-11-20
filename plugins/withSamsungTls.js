@@ -1,8 +1,8 @@
 // Samsung TVs serve the remote-control socket (port 8002) with a self-signed
-// certificate issued by "SmartViewSDK". Android rejects that by default, so this
-// plugin installs an OkHttp factory that accepts it ONLY when the certificate is
-// from SmartViewSDK and the host is a private LAN IP. Everything else keeps
-// normal TLS validation.
+// self-signed certificate issued by "SmartViewSDK". Android rejects that by default,
+// so this plugin installs an OkHttp factory that accepts a self-signed cert ONLY when
+// the peer is a private LAN address AND (it is port 8002 or the issuer is SmartViewSDK).
+// Everything else keeps normal TLS validation.
 const fs = require('fs');
 const path = require('path');
 const { withDangerousMod, withMainApplication } = require('expo/config-plugins');
@@ -11,34 +11,65 @@ const kotlin = (pkg) => `package ${pkg}
 
 import com.facebook.react.modules.network.OkHttpClientFactory
 import com.facebook.react.modules.network.OkHttpClientProvider
+import java.net.InetAddress
+import java.net.Socket
 import java.security.KeyStore
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509ExtendedTrustManager
 import javax.net.ssl.X509TrustManager
 import okhttp3.OkHttpClient
 import okhttp3.internal.tls.OkHostnameVerifier
 
+// RN's WebSocketModule builds its client from OkHttpClientProvider.getOkHttpClient(),
+// so this factory covers both fetch and WebSocket.
 class SamsungTvClientFactory : OkHttpClientFactory {
+  private fun isPrivate(addr: InetAddress?) =
+    addr != null && (addr.isSiteLocalAddress || addr.isLinkLocalAddress)
+
   override fun createNewNetworkModuleClient(): OkHttpClient {
     val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
     tmf.init(null as KeyStore?)
     val system = tmf.trustManagers.first { it is X509TrustManager } as X509TrustManager
 
-    val trust = object : X509TrustManager {
-      override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
-        system.checkClientTrusted(chain, authType)
+    // Extended trust manager so the self-signed exception can check WHO we are talking
+    // to. The plain 2-arg check has no peer info and would trust a "SmartViewSDK"
+    // cert for any host on the internet.
+    val trust = object : X509ExtendedTrustManager() {
+      private fun tvCert(chain: Array<X509Certificate>, port: Int): Boolean {
+        val issuer = chain.firstOrNull()?.issuerX500Principal?.name ?: ""
+        return port == 8002 || issuer.contains("SmartViewSDK")
+      }
 
-      override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+      private fun check(chain: Array<X509Certificate>, authType: String, addr: InetAddress?, port: Int) {
         try {
           system.checkServerTrusted(chain, authType)
         } catch (e: CertificateException) {
-          val issuer = chain.firstOrNull()?.issuerX500Principal?.name ?: ""
-          if (!issuer.contains("SmartViewSDK")) throw e
+          if (!isPrivate(addr) || !tvCert(chain, port)) throw e
         }
       }
+
+      override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket) =
+        check(chain, authType, socket.inetAddress, socket.port)
+
+      override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine) =
+        check(chain, authType, runCatching { InetAddress.getByName(engine.peerHost) }.getOrNull(), engine.peerPort)
+
+      override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) =
+        system.checkServerTrusted(chain, authType)
+
+      override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket) =
+        system.checkClientTrusted(chain, authType)
+
+      override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine) =
+        system.checkClientTrusted(chain, authType)
+
+      override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
+        system.checkClientTrusted(chain, authType)
 
       override fun getAcceptedIssuers(): Array<X509Certificate> = system.acceptedIssuers
     }
@@ -46,7 +77,9 @@ class SamsungTvClientFactory : OkHttpClientFactory {
     val ssl = SSLContext.getInstance("TLS")
     ssl.init(null, arrayOf(trust), null)
 
-    val privateIp = Regex("^(10\\\\.|192\\\\.168\\\\.|172\\\\.(1[6-9]|2\\\\d|3[01])\\\\.).*")
+    // The TV cert has no SAN for its IP. Skip the hostname check only for literal
+    // private IPv4 addresses; everything else gets normal verification.
+    val privateIp = Regex("^(10\\\\.|192\\\\.168\\\\.|172\\\\.(1[6-9]|2\\\\d|3[01])\\\\.)[0-9.]+$")
     val verifier = HostnameVerifier { host, session ->
       privateIp.matches(host) || OkHostnameVerifier.verify(host, session)
     }
