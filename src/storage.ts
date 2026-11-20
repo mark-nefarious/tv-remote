@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type SavedTv = { ip: string; mac: string; name: string; token: string | null };
+// `customName` is the user's own label; `name` is what the TV reports.
+export type SavedTv = { ip: string; mac: string; name: string; customName?: string; token: string | null };
 
 const KEY = 'tv-remote:tv';
 

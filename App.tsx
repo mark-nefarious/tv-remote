@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -21,6 +22,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { SamsungTv, TvStatus, fetchTvInfo } from './src/samsung';
 import { SavedTv, clearTv, loadTv, saveTv } from './src/storage';
 import { wakeOnLan } from './src/wol';
+import { Update, checkForUpdate } from './src/update';
 
 const C = {
   bg: '#0E0F12',
@@ -139,9 +141,9 @@ function RemoteScreen({
 }) {
   const [status, setStatus] = useState<TvStatus>('disconnected');
   const [diag, setDiag] = useState('');
-  const [text, setText] = useState('');
-  const [textMsg, setTextMsg] = useState<{ msg: string; warn: boolean } | null>(null);
-  const [tvKeyboard, setTvKeyboard] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [update, setUpdate] = useState<Update | null>(null);
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState('');
   const tvRef = useRef<SamsungTv | null>(null);
@@ -170,7 +172,6 @@ function RemoteScreen({
         if (st === 'connected') refreshInfo();
       },
       onDiag: setDiag,
-      onIme: setTvKeyboard,
       onToken: (token) => onUpdateRef.current({ ...tvDataRef.current, token }),
     });
     tvRef.current = remote;
@@ -312,24 +313,19 @@ function RemoteScreen({
   // Keep at least 20px of breathing room between each rocker and the wheel.
   const ring = Math.max(140, Math.min(184, width - 36 - 2 * 54 - 2 * 20));
 
-  const sendText = () => {
-    if (!text) return;
-    const r = tvRef.current?.sendText(text) ?? 'not-connected';
-    if (r === 'not-connected') {
-      tvRef.current?.ensureConnected();
-      setTextMsg({ msg: 'Not connected to the TV. Reconnecting; try again in a moment.', warn: true });
-      return;
-    }
-    setText('');
-    setTextMsg(
-      r === 'sent'
-        ? { msg: 'Sent to the TV.', warn: false }
-        : {
-            msg:
-              "Sent, but the TV hasn't opened its keyboard, so it may ignore it. Select a search or text box on the TV first. Apps with their own keyboard (YouTube, Netflix) don't accept typed text.",
-            warn: true,
-          },
-    );
+  useEffect(() => {
+    checkForUpdate().then(setUpdate);
+  }, []);
+
+  const displayName = tv.customName || tv.name;
+  const startRename = () => {
+    setNameDraft(displayName);
+    setEditingName(true);
+  };
+  const saveName = () => {
+    setEditingName(false);
+    const n = nameDraft.trim();
+    if (n && n !== displayName) onUpdate({ ...tvDataRef.current, customName: n });
   };
 
   const statusInfo = {
@@ -349,9 +345,27 @@ function RemoteScreen({
           onPress={() => (tvRef.current?.isConnected ? tvRef.current.ping() : tvRef.current?.connect())}
           onLongPress={forget}
         >
-          <Text style={s.tvName} numberOfLines={1}>
-            {tv.name}
-          </Text>
+          {editingName ? (
+            <TextInput
+              value={nameDraft}
+              onChangeText={setNameDraft}
+              onSubmitEditing={saveName}
+              onBlur={saveName}
+              autoFocus
+              selectTextOnFocus
+              returnKeyType="done"
+              style={[s.tvName, s.nameInput]}
+            />
+          ) : (
+            <View style={s.nameRow}>
+              <Text style={[s.tvName, { flexShrink: 1 }]} numberOfLines={1}>
+                {displayName}
+              </Text>
+              <Pressable onPress={startRename} hitSlop={12}>
+                <MaterialCommunityIcons name="pencil-outline" size={18} color={C.dim} />
+              </Pressable>
+            </View>
+          )}
           <View style={s.statusRow}>
             <View style={[s.dot, { backgroundColor: statusInfo.color }]} />
             <Text style={s.statusText}>{statusInfo.label}</Text>
@@ -372,6 +386,13 @@ function RemoteScreen({
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }} keyboardShouldPersistTaps="handled">
+        {update && (
+          <Pressable style={s.update} onPress={() => Linking.openURL(update.url)}>
+            <MaterialCommunityIcons name="download" size={20} color="#fff" />
+            <Text style={s.updateText}>Update available. Tap to download, then open it to install.</Text>
+          </Pressable>
+        )}
+
         {!!wakeMsg && status !== 'connected' && <Text style={[s.p, { color: C.amber }]}>{wakeMsg}</Text>}
 
         {status === 'denied' && (
@@ -381,26 +402,6 @@ function RemoteScreen({
           </Text>
         )}
 
-        <View style={s.typeRow}>
-          <TextInput
-            value={text}
-            onChangeText={(t) => {
-              setText(t);
-              setTextMsg(null);
-            }}
-            placeholder={tvKeyboard ? 'TV keyboard is open: type here' : 'Type on TV (open a text box on the TV first)'}
-            placeholderTextColor={tvKeyboard ? C.green : C.dim}
-            style={[s.input, { flex: 1, marginBottom: 0, paddingVertical: 10, fontSize: 15 }]}
-            onSubmitEditing={sendText}
-            returnKeyType="send"
-          />
-          {!!text && (
-            <Pressable style={s.send} onPress={sendText}>
-              <Text style={s.primaryText}>Send</Text>
-            </Pressable>
-          )}
-        </View>
-        {!!textMsg && <Text style={[s.p, { color: textMsg.warn ? C.amber : C.green }]}>{textMsg.msg}</Text>}
       </ScrollView>
 
       {/* ---- Bottom: thumb zone ---- */}
@@ -601,6 +602,8 @@ const s = StyleSheet.create({
   rockMid: { flex: 0, height: 34, backgroundColor: 'transparent', borderRadius: 0 },
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
-  typeRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  send: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 16 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  nameInput: { borderBottomWidth: 1, borderBottomColor: C.accent, paddingVertical: 2 },
+  update: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.accent, borderRadius: 12, padding: 14 },
+  updateText: { color: '#fff', fontSize: 14, fontWeight: '600', flex: 1 },
 });
