@@ -209,7 +209,7 @@ function RemoteScreen({
             <Text style={s.statusText}>{statusInfo.label}</Text>
           </View>
         </Pressable>
-        <Btn label={waking ? '…' : '⏻'} onPress={power} color={C.red} style={s.power} big />
+        <Btn label={waking ? '…' : '⏻'} onPress={power} strong color={C.red} style={s.power} big />
       </View>
 
       {status === 'denied' && (
@@ -352,12 +352,36 @@ function Rocker(p: {
     </View>
   );
 }
+/* ---------------- Haptics ---------------- */
+
+// Android's native key haptics feel crisper than the generic impact styles.
+function buzz(kind: 'press' | 'tick' | 'strong') {
+  if (Platform.OS === 'android') {
+    const type =
+      kind === 'strong'
+        ? Haptics.AndroidHaptics.Long_Press
+        : kind === 'tick'
+          ? Haptics.AndroidHaptics.Keyboard_Tap
+          : Haptics.AndroidHaptics.Virtual_Key;
+    Haptics.performAndroidHapticsAsync(type).catch(() => {});
+  } else {
+    const style =
+      kind === 'strong'
+        ? Haptics.ImpactFeedbackStyle.Heavy
+        : kind === 'tick'
+          ? Haptics.ImpactFeedbackStyle.Light
+          : Haptics.ImpactFeedbackStyle.Medium;
+    Haptics.impactAsync(style).catch(() => {});
+  }
+}
+
 /* ---------------- Button ---------------- */
 
 function Btn({
   label,
   onPress,
   repeat,
+  strong,
   big,
   color,
   style,
@@ -366,6 +390,7 @@ function Btn({
   label: string;
   onPress: () => void;
   repeat?: boolean;
+  strong?: boolean;
   big?: boolean;
   color?: string;
   style?: any;
@@ -384,9 +409,17 @@ function Btn({
   return (
     <Pressable
       onPressIn={() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        buzz(strong ? 'strong' : 'press');
         onPress();
-        if (repeat) delay.current = setTimeout(() => (interval.current = setInterval(onPress, 120)), 400);
+        if (repeat)
+          delay.current = setTimeout(
+            () =>
+              (interval.current = setInterval(() => {
+                buzz('tick');
+                onPress();
+              }, 120)),
+            400,
+          );
       }}
       onPressOut={stop}
       style={({ pressed }) => [s.btn, style, pressed && { backgroundColor: C.btnPressed }]}
