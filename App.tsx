@@ -134,6 +134,7 @@ function RemoteScreen({
   const [apps, setApps] = useState<TvApp[]>([]);
   const [text, setText] = useState('');
   const [waking, setWaking] = useState(false);
+  const [wakeMsg, setWakeMsg] = useState('');
   const tvRef = useRef<SamsungTv | null>(null);
   const tvDataRef = useRef(tv);
   tvDataRef.current = tv;
@@ -203,11 +204,13 @@ function RemoteScreen({
     const remote = tvRef.current;
     if (!remote || waking) return;
     if (remote.isConnected) {
+      setWakeMsg('');
       remote.sendKey('KEY_POWER');
       return;
     }
     const { mac, ip } = tvDataRef.current;
     if (!mac) {
+      setWakeMsg("Can't wake: the TV's network address isn't saved. Turn the TV on, open the app once, then try again.");
       remote.connect();
       return;
     }
@@ -219,17 +222,23 @@ function RemoteScreen({
       // Poll the cheap HTTP endpoint until the TV's network is up, then open the socket once.
       // Reconnecting on a timer would abort a slow TLS handshake to a booting TV.
       for (let i = 0; i < 15 && live(); i++) {
-        if (i % 3 === 0) await wakeOnLan(mac, ip).catch(() => {});
+        if (i % 3 === 0)
+          await wakeOnLan(mac, ip)
+            .then(() => live() && setWakeMsg(`Wake signal sent to ${mac}. Waiting for TV…`))
+            .catch((e) => live() && setWakeMsg(`Wake signal failed: ${e?.message ?? e}`));
         if (!live()) return;
         if (remote.isConnected) return;
         if (await fetchTvInfo(ip, 1500)) {
           if (!live()) return;
+          setWakeMsg('');
           remote.ensureConnected();
           for (let j = 0; j < 20 && live() && remote.currentStatus === 'connecting'; j++) await sleep(500);
           return;
         }
         await sleep(1500);
       }
+      if (live() && !remote.isConnected)
+        setWakeMsg((m) => (m.startsWith('Wake signal sent') ? `Sent to ${mac} but the TV didn't respond.` : m));
     } finally {
       if (live()) setWaking(false);
     }
@@ -277,6 +286,8 @@ function RemoteScreen({
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }} keyboardShouldPersistTaps="handled">
+        {!!wakeMsg && status !== 'connected' && <Text style={[s.p, { color: C.amber }]}>{wakeMsg}</Text>}
+
         {status === 'denied' && (
           <Text style={[s.p, { color: C.red }]}>
             On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device List.
