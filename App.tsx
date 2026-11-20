@@ -5,7 +5,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -132,7 +131,8 @@ function RemoteScreen({
   const [apps, setApps] = useState<TvApp[]>([]);
   const [text, setText] = useState('');
   const [waking, setWaking] = useState(false);
-  const [showColours, setShowColours] = useState(false);
+  const [panel, setPanel] = useState<'none' | 'num' | 'colour'>('none');
+  const toggle = (p: 'num' | 'colour') => setPanel((cur) => (cur === p ? 'none' : p));
   const tvRef = useRef<SamsungTv | null>(null);
   const tvDataRef = useRef(tv);
   tvDataRef.current = tv;
@@ -221,11 +221,19 @@ function RemoteScreen({
 
       <View style={s.row}>
         <Btn label="Source" onPress={() => key('KEY_SOURCE')} style={s.small} />
-        <Btn label="123" onPress={() => key('KEY_MORE')} style={s.small} />
-        <Btn label="● ● ● ●" onPress={() => setShowColours((v) => !v)} style={s.small} />
+        <Btn label="123" onPress={() => toggle('num')} style={s.small} />
+        <Btn label="● ● ● ●" onPress={() => toggle('colour')} style={s.small} />
       </View>
 
-      {showColours && (
+      {panel === 'num' && (
+        <View style={s.numPad}>
+          {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].map((n) => (
+            <Btn key={n} label={n} onPress={() => key(`KEY_${n}`)} style={s.numKey} />
+          ))}
+        </View>
+      )}
+
+      {panel === 'colour' && (
         <View style={s.row}>
           {[
             ['KEY_RED', C.red],
@@ -238,27 +246,19 @@ function RemoteScreen({
         </View>
       )}
 
-      {apps.length > 0 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ gap: 8 }}
-          style={{ flexGrow: 0 }}
-        >
-          {sortApps(apps).map((a) => (
-            <Pressable
-              key={a.appId}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                tvRef.current?.launchApp(a);
-              }}
-              style={({ pressed }) => [s.chip, pressed && { backgroundColor: C.btnPressed }]}
-            >
-              <Text style={s.chipText}>{a.name}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      )}
+      <View style={s.row}>
+        {SHORTCUTS.map((sc) => {
+          const app = apps.find((a) => sc.match.test(a.name));
+          return (
+            <Btn
+              key={sc.label}
+              label={sc.label}
+              onPress={() => app && tvRef.current?.launchApp(app)}
+              style={[s.small, { backgroundColor: sc.colour }, !app && { opacity: 0.4 }]}
+            />
+          );
+        })}
+      </View>
 
       <View style={s.typeRow}>
         <TextInput
@@ -282,21 +282,21 @@ function RemoteScreen({
 
       <View style={s.thumb}>
         <Rocker
-          up={() => key('KEY_VOLUP')}
-          down={() => key('KEY_VOLDOWN')}
-          mid={() => key('KEY_MUTE')}
-          upLabel="+"
-          downLabel="−"
-          midLabel="VOL"
-        />
-        <DPad onKey={key} />
-        <Rocker
           up={() => key('KEY_CHUP')}
           down={() => key('KEY_CHDOWN')}
           mid={() => key('KEY_CH_LIST')}
           upLabel="︿"
           downLabel="﹀"
           midLabel="CH"
+        />
+        <DPad onKey={key} />
+        <Rocker
+          up={() => key('KEY_VOLUP')}
+          down={() => key('KEY_VOLDOWN')}
+          mid={() => key('KEY_MUTE')}
+          upLabel="+"
+          downLabel="−"
+          midLabel="VOL"
         />
       </View>
 
@@ -309,14 +309,12 @@ function RemoteScreen({
   );
 }
 
-const FAVOURITES = ['Netflix', 'Prime Video', 'YouTube', 'TVNZ+', 'ThreeNow', 'Disney+'];
-function sortApps(apps: TvApp[]) {
-  const rank = (a: TvApp) => {
-    const i = FAVOURITES.findIndex((f) => a.name.toLowerCase().includes(f.toLowerCase()));
-    return i === -1 ? 99 : i;
-  };
-  return [...apps].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
-}
+// Matched against the TV's installed app names, so IDs never need hard-coding.
+const SHORTCUTS = [
+  { label: 'Netflix', match: /netflix/i, colour: '#B20710' },
+  { label: 'TVNZ+', match: /tvnz/i, colour: '#1E3A8A' },
+  { label: 'Stremio', match: /stremio/i, colour: '#5B3FA8' },
+];
 
 /* ---------------- D-pad ---------------- */
 
@@ -457,8 +455,8 @@ const s = StyleSheet.create({
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
   section: { color: C.dim, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
-  chip: { backgroundColor: C.btn, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10 },
-  chipText: { color: C.text, fontSize: 14 },
+  numPad: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center' },
+  numKey: { flex: 0, width: '18%', height: 44, borderRadius: 12 },
   typeRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   send: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 16 },
 });
