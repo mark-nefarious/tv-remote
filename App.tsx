@@ -10,14 +10,15 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  Vibration,
   View,
   useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import * as Haptics from 'expo-haptics';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { SamsungTv, TvApp, TvStatus, fetchTvInfo } from './src/samsung';
+import { SamsungTv, TvStatus, fetchTvInfo } from './src/samsung';
 import { SavedTv, clearTv, loadTv, saveTv } from './src/storage';
 import { wakeOnLan } from './src/wol';
 
@@ -112,14 +113,20 @@ function SetupScreen({ onDone }: { onDone: (tv: SavedTv) => void }) {
         {busy ? <ActivityIndicator color="#fff" /> : <Text style={s.primaryText}>Connect</Text>}
       </Pressable>
       <Text style={[s.p, { marginTop: 24 }]}>
-        To turn the TV on from your phone, enable: Settings › Connection › Network › Expert Settings › Power
-        On with Mobile.
+        To turn the TV on from your phone, enable: Settings › General › Network › Expert Settings › Power On
+        with Mobile (on newer TVs: Settings › Connection › Network › Expert Settings).
       </Text>
     </KeyboardAvoidingView>
   );
 }
 
 /* ---------------- Remote ---------------- */
+
+type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+
+// Keep the socket through short trips out of the app (notification shade, a quick
+// app switch). Reconnecting means a full TLS handshake to a slow TV.
+const BACKGROUND_GRACE_MS = 30000;
 
 function RemoteScreen({
   tv,
@@ -131,8 +138,10 @@ function RemoteScreen({
   onForget: () => void;
 }) {
   const [status, setStatus] = useState<TvStatus>('disconnected');
-  const [apps, setApps] = useState<TvApp[]>([]);
+  const [diag, setDiag] = useState('');
   const [text, setText] = useState('');
+  const [textMsg, setTextMsg] = useState<{ msg: string; warn: boolean } | null>(null);
+  const [tvKeyboard, setTvKeyboard] = useState(false);
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState('');
   const tvRef = useRef<SamsungTv | null>(null);
@@ -160,24 +169,34 @@ function RemoteScreen({
         setStatus(st);
         if (st === 'connected') refreshInfo();
       },
-      onApps: setApps,
+      onDiag: setDiag,
+      onIme: setTvKeyboard,
       onToken: (token) => onUpdateRef.current({ ...tvDataRef.current, token }),
     });
     tvRef.current = remote;
     remote.connect();
 
-    // A socket left open while the phone sleeps goes half-open and silently eats key presses.
-    // Drop it in the background and always start fresh on return (token is saved, no prompt).
+    let bgTimer: ReturnType<typeof setTimeout> | null = null;
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') remote.ensureConnected();
-      else if (state === 'background') {
-        wakeRun.current++;
-        setWaking(false);
-        remote.stop();
+      if (state === 'active') {
+        if (bgTimer) clearTimeout(bgTimer);
+        bgTimer = null;
+        // Connected: verify it's really alive (the phone may have slept). Anything else
+        // (including an attempt stuck mid-handshake): start fresh now.
+        if (remote.isConnected) remote.ping();
+        else if (remote.currentStatus !== 'waiting-for-allow' && remote.currentStatus !== 'denied') remote.connect();
+      } else if (state === 'background' && !bgTimer) {
+        bgTimer = setTimeout(() => {
+          bgTimer = null;
+          wakeRun.current++;
+          setWaking(false);
+          remote.stop();
+        }, BACKGROUND_GRACE_MS);
       }
     });
     return () => {
       sub.remove();
+      if (bgTimer) clearTimeout(bgTimer);
       wakeRun.current++;
       remote.stop();
       tvRef.current = null;
@@ -186,62 +205,100 @@ function RemoteScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tv.ip]);
 
+  // Fires on press-in. Never queued: if the socket isn't up the press is dropped,
+  // the phone double-buzzes, and a reconnect starts.
   const key = useCallback((k: string) => {
     const remote = tvRef.current;
-    if (!remote) return;
-    if (remote.isConnected) remote.sendKey(k);
-    else remote.ensureConnected();
+    if (remote?.sendKey(k)) return true;
+    remote?.ensureConnected();
+    return false;
   }, []);
 
   // Samsung has no documented play/pause toggle key; alternate the two.
   const playing = useRef(true);
   const playPause = () => {
-    key(playing.current ? 'KEY_PAUSE' : 'KEY_PLAY');
-    playing.current = !playing.current;
+    const sent = key(playing.current ? 'KEY_PAUSE' : 'KEY_PLAY');
+    if (sent) playing.current = !playing.current;
+    return sent;
   };
 
   const power = async () => {
     const remote = tvRef.current;
-    if (!remote || waking) return;
+    if (!remote) return false;
     if (remote.isConnected) {
       setWakeMsg('');
-      remote.sendKey('KEY_POWER');
-      return;
+      return remote.sendKey('KEY_POWER');
     }
+    if (waking) return true;
     const { mac, ip } = tvDataRef.current;
     if (!mac) {
       setWakeMsg("Can't wake: the TV's network address isn't saved. Turn the TV on, open the app once, then try again.");
       remote.connect();
-      return;
+      return false;
     }
     const run = ++wakeRun.current;
     const live = () => wakeRun.current === run;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const started = Date.now();
+    const secs = () => Math.round((Date.now() - started) / 1000);
     setWaking(true);
-    try {
-      // Poll the cheap HTTP endpoint until the TV's network is up, then open the socket once.
-      // Reconnecting on a timer would abort a slow TLS handshake to a booting TV.
-      for (let i = 0; i < 15 && live(); i++) {
-        if (i % 3 === 0)
-          await wakeOnLan(mac, ip)
-            .then(() => live() && setWakeMsg(`Wake signal sent to ${mac}. Waiting for TV…`))
-            .catch((e) => live() && setWakeMsg(`Wake signal failed: ${e?.message ?? e}`));
-        if (!live()) return;
-        if (remote.isConnected) return;
-        if (await fetchTvInfo(ip, 1500)) {
-          if (!live()) return;
-          setWakeMsg('');
-          remote.ensureConnected();
-          for (let j = 0; j < 20 && live() && remote.currentStatus === 'connecting'; j++) await sleep(500);
-          return;
-        }
-        await sleep(1500);
+    setWakeMsg(`Sending wake signal to ${mac}…`);
+
+    // Wake-on-LAN burst: every 700 ms for the first 10 s, then every 2 s.
+    let wolOk = false;
+    let wolErr = '';
+    (async () => {
+      while (live() && !remote.isConnected && Date.now() - started < 40000) {
+        await wakeOnLan(mac, ip).then(
+          () => (wolOk = true),
+          (e) => (wolErr = String(e?.message ?? e)),
+        );
+        await sleep(Date.now() - started < 10000 ? 700 : 2000);
       }
-      if (live() && !remote.isConnected)
-        setWakeMsg((m) => (m.startsWith('Wake signal sent') ? `Sent to ${mac} but the TV didn't respond.` : m));
+    })();
+
+    try {
+      // Poll the TV's HTTP endpoint fast; connect the moment it answers.
+      let answered = false;
+      while (live() && !remote.isConnected && Date.now() - started < 40000) {
+        if (!answered) {
+          setWakeMsg(
+            wolOk
+              ? `Wake signal sent to ${mac}. Waiting for TV… ${secs()}s`
+              : wolErr
+                ? `Wake signal failed: ${wolErr}`
+                : `Sending wake signal to ${mac}…`,
+          );
+          const t0 = Date.now();
+          const info = await fetchTvInfo(ip, 900);
+          if (!live()) return true;
+          if (info) {
+            answered = true;
+            setWakeMsg(`TV is up. Connecting… ${secs()}s`);
+            // Force a fresh attempt: any earlier one was aimed at a TV that was off.
+            remote.connect();
+          } else await sleep(Math.max(0, 400 - (Date.now() - t0)));
+        } else {
+          // TV answered; keep the socket attempt going until it lands.
+          remote.ensureConnected();
+          await sleep(250);
+        }
+      }
+      if (!live()) return true;
+      if (remote.isConnected) {
+        setWakeMsg('');
+        // Network standby answers but leaves the screen off; KEY_POWER turns it on.
+        const info = await fetchTvInfo(ip, 1500);
+        if (live() && info?.powerState === 'standby') remote.sendKey('KEY_POWER');
+      } else if (!answered) {
+        setWakeMsg(wolOk ? `Sent to ${mac} but the TV didn't respond.` : `Wake signal failed: ${wolErr || 'unknown error'}`);
+      } else {
+        setWakeMsg("The TV answered but the remote connection didn't open. Tap the TV name to retry.");
+      }
     } finally {
       if (live()) setWaking(false);
     }
+    return true;
   };
 
   const forget = () =>
@@ -257,8 +314,22 @@ function RemoteScreen({
 
   const sendText = () => {
     if (!text) return;
-    if (tvRef.current?.sendText(text)) setText('');
-    else tvRef.current?.ensureConnected();
+    const r = tvRef.current?.sendText(text) ?? 'not-connected';
+    if (r === 'not-connected') {
+      tvRef.current?.ensureConnected();
+      setTextMsg({ msg: 'Not connected to the TV. Reconnecting; try again in a moment.', warn: true });
+      return;
+    }
+    setText('');
+    setTextMsg(
+      r === 'sent'
+        ? { msg: 'Sent to the TV.', warn: false }
+        : {
+            msg:
+              "Sent, but the TV hasn't opened its keyboard, so it may ignore it. Select a search or text box on the TV first. Apps with their own keyboard (YouTube, Netflix) don't accept typed text.",
+            warn: true,
+          },
+    );
   };
 
   const statusInfo = {
@@ -273,7 +344,11 @@ function RemoteScreen({
     <View style={s.remote}>
       {/* ---- Top: rarely used ---- */}
       <View style={s.header}>
-        <Pressable style={{ flex: 1 }} onPress={() => tvRef.current?.connect()} onLongPress={forget}>
+        <Pressable
+          style={{ flex: 1 }}
+          onPress={() => (tvRef.current?.isConnected ? tvRef.current.ping() : tvRef.current?.connect())}
+          onLongPress={forget}
+        >
           <Text style={s.tvName} numberOfLines={1}>
             {tv.name}
           </Text>
@@ -281,8 +356,19 @@ function RemoteScreen({
             <View style={[s.dot, { backgroundColor: statusInfo.color }]} />
             <Text style={s.statusText}>{statusInfo.label}</Text>
           </View>
+          {!!diag && status !== 'connected' && (
+            <Text style={s.diagText} numberOfLines={2}>
+              {diag}
+            </Text>
+          )}
         </Pressable>
-        <Btn label={waking ? '…' : '⏻'} onPress={power} strong color={C.red} style={s.power} big />
+        {waking ? (
+          <View style={[s.btn, s.power]}>
+            <ActivityIndicator color={C.red} />
+          </View>
+        ) : (
+          <Btn icon="power" onPress={power} strong color={C.red} style={s.power} />
+        )}
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }} keyboardShouldPersistTaps="handled">
@@ -290,36 +376,20 @@ function RemoteScreen({
 
         {status === 'denied' && (
           <Text style={[s.p, { color: C.red }]}>
-            On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device List.
+            On the TV: Settings › General › External Device Manager › Device Connection Manager › Device List.
             Allow this phone, then tap the TV name.
           </Text>
         )}
 
-        <View style={s.row}>
-          {SHORTCUTS.map((sc) => {
-            const app = apps.find((a) => sc.match.test(a.name)) ?? (sc.id ? { appId: sc.id, appType: 2 } : null);
-            return (
-              <Btn
-                release
-                key={sc.label}
-                label={sc.label}
-                onPress={() => {
-                  if (!app) return;
-                  if (tvRef.current?.isConnected) tvRef.current.launchApp(app);
-                  else tvRef.current?.ensureConnected();
-                }}
-                style={[s.small, { backgroundColor: sc.colour }, !app && { opacity: 0.4 }]}
-              />
-            );
-          })}
-        </View>
-
         <View style={s.typeRow}>
           <TextInput
             value={text}
-            onChangeText={setText}
-            placeholder="Type on TV…"
-            placeholderTextColor={C.dim}
+            onChangeText={(t) => {
+              setText(t);
+              setTextMsg(null);
+            }}
+            placeholder={tvKeyboard ? 'TV keyboard is open: type here' : 'Type on TV (open a text box on the TV first)'}
+            placeholderTextColor={tvKeyboard ? C.green : C.dim}
             style={[s.input, { flex: 1, marginBottom: 0, paddingVertical: 10, fontSize: 15 }]}
             onSubmitEditing={sendText}
             returnKeyType="send"
@@ -330,6 +400,7 @@ function RemoteScreen({
             </Pressable>
           )}
         </View>
+        {!!textMsg && <Text style={[s.p, { color: textMsg.warn ? C.amber : C.green }]}>{textMsg.msg}</Text>}
       </ScrollView>
 
       {/* ---- Bottom: thumb zone ---- */}
@@ -340,8 +411,8 @@ function RemoteScreen({
           up={() => key('KEY_CHUP')}
           down={() => key('KEY_CHDOWN')}
           mid={() => key('KEY_CH_LIST')}
-          upLabel="︿"
-          downLabel="﹀"
+          upIcon="chevron-up"
+          downIcon="chevron-down"
           midLabel="CH"
         />
         <DPad onKey={key} size={ring} />
@@ -350,50 +421,42 @@ function RemoteScreen({
           up={() => key('KEY_VOLUP')}
           down={() => key('KEY_VOLDOWN')}
           mid={() => key('KEY_MUTE')}
-          upLabel="+"
-          downLabel="−"
+          upIcon="plus"
+          downIcon="minus"
           midLabel="VOL"
         />
       </View>
 
       <View style={s.row}>
-        <Btn label="↩" onPress={() => key('KEY_RETURN')} big />
-        <Btn label="⌂" onPress={() => key('KEY_HOME')} big />
-        <Btn label="⏯" onPress={playPause} big />
-        <Btn label="🔇" onPress={() => key('KEY_MUTE')} big />
+        <Btn icon="arrow-u-left-top" onPress={() => key('KEY_RETURN')} />
+        <Btn icon="home-outline" onPress={() => key('KEY_HOME')} />
+        <Btn icon="play-pause" onPress={playPause} />
+        <Btn icon="volume-off" onPress={() => key('KEY_MUTE')} />
       </View>
     </View>
   );
 }
 
-// Matched against the TV's installed app names, so IDs never need hard-coding.
-// `id` is a fallback for firmware that never answers the installed-apps request.
-const SHORTCUTS: { label: string; match: RegExp; colour: string; id?: string }[] = [
-  { label: 'Netflix', match: /netflix/i, colour: '#B20710', id: '3201907018807' },
-  { label: 'TVNZ+', match: /tvnz/i, colour: '#1E3A8A' },
-  { label: 'Stremio', match: /stremio/i, colour: '#5B3FA8' },
-];
-
 /* ---------------- D-pad ---------------- */
 
-function DPad({ onKey, size }: { onKey: (k: string) => void; size: number }) {
+function DPad({ onKey, size }: { onKey: (k: string) => boolean; size: number }) {
   const z = Math.round(size * 0.35);
   const ok = Math.round(size * 0.47);
-  const zone = (k: string, label: string, pos: object) => (
+  const zone = (k: string, icon: IconName, pos: object) => (
     <Btn
-      label={label}
+      icon={icon}
       onPress={() => onKey(k)}
       repeat
+      color={C.dim}
       style={[s.dZone, { width: z, height: z, borderRadius: z / 2 }, pos]}
-      textStyle={{ color: C.dim }}
     />
   );
   return (
     <View style={[s.ring, { width: size, height: size, borderRadius: size / 2 }]}>
-      {zone('KEY_UP', '▲', { top: 0, left: size / 2 - z / 2 })}
-      {zone('KEY_DOWN', '▼', { bottom: 0, left: size / 2 - z / 2 })}
-      {zone('KEY_LEFT', '◀', { left: 0, top: size / 2 - z / 2 })}
-      {zone('KEY_RIGHT', '▶', { right: 0, top: size / 2 - z / 2 })}
+      {zone('KEY_UP', 'chevron-up', { top: 0, left: size / 2 - z / 2 })}
+      {zone('KEY_DOWN', 'chevron-down', { bottom: 0, left: size / 2 - z / 2 })}
+      {zone('KEY_LEFT', 'chevron-left', { left: 0, top: size / 2 - z / 2 })}
+      {zone('KEY_RIGHT', 'chevron-right', { right: 0, top: size / 2 - z / 2 })}
       <Btn
         label="OK"
         onPress={() => onKey('KEY_ENTER')}
@@ -407,65 +470,50 @@ function DPad({ onKey, size }: { onKey: (k: string) => void; size: number }) {
 
 function Rocker(p: {
   size: number;
-  up: () => void;
-  down: () => void;
-  mid: () => void;
-  upLabel: string;
-  downLabel: string;
+  up: () => boolean;
+  down: () => boolean;
+  mid: () => boolean;
+  upIcon: IconName;
+  downIcon: IconName;
   midLabel: string;
 }) {
   return (
     <View style={[s.rocker, { height: p.size }]}>
-      <Btn label={p.upLabel} onPress={p.up} repeat style={s.rockBtn} big />
+      <Btn icon={p.upIcon} onPress={p.up} repeat style={s.rockBtn} />
       <Btn label={p.midLabel} onPress={p.mid} style={s.rockMid} textStyle={s.rockLabel} />
-      <Btn label={p.downLabel} onPress={p.down} repeat style={s.rockBtn} big />
+      <Btn icon={p.downIcon} onPress={p.down} repeat style={s.rockBtn} />
     </View>
   );
 }
+
 /* ---------------- Haptics ---------------- */
 
-// Android's native key haptics feel crisper than the generic impact styles.
-function buzz(kind: 'press' | 'tick' | 'strong') {
-  if (Platform.OS === 'android') {
-    const type =
-      kind === 'strong'
-        ? Haptics.AndroidHaptics.Long_Press
-        : kind === 'tick'
-          ? Haptics.AndroidHaptics.Keyboard_Tap
-          : Haptics.AndroidHaptics.Virtual_Key;
-    Haptics.performAndroidHapticsAsync(type).catch(() => {});
-  } else {
-    const style =
-      kind === 'strong'
-        ? Haptics.ImpactFeedbackStyle.Heavy
-        : kind === 'tick'
-          ? Haptics.ImpactFeedbackStyle.Light
-          : Haptics.ImpactFeedbackStyle.Medium;
-    Haptics.impactAsync(style).catch(() => {});
-  }
+// Drives the Vibrator directly (one-shot at default amplitude). Samsung ignores
+// View.performHapticFeedback when its touch-feedback setting is off or low, and
+// expo-haptics' impact waveforms run at 12-27% amplitude, which is barely felt.
+function buzz(kind: 'press' | 'tick' | 'strong' | 'missed') {
+  if (kind === 'missed') Vibration.vibrate([0, 15, 70, 15]);
+  else Vibration.vibrate(kind === 'strong' ? 40 : kind === 'tick' ? 12 : 20);
 }
 
 /* ---------------- Button ---------------- */
 
 function Btn({
   label,
+  icon,
   onPress,
-  release,
   repeat,
   strong,
-  big,
   color,
   style,
   textStyle,
 }: {
-  label: string;
-  onPress: () => void;
-  // Fire on release instead of touch-down. Used inside the ScrollView so a scroll
-  // gesture that starts on a button doesn't send a key.
-  release?: boolean;
+  label?: string;
+  icon?: IconName;
+  // Returns false if the key couldn't be sent, for a "missed" buzz.
+  onPress: () => boolean | void | Promise<boolean | void>;
   repeat?: boolean;
   strong?: boolean;
-  big?: boolean;
   color?: string;
   style?: any;
   textStyle?: any;
@@ -480,34 +528,25 @@ function Btn({
   };
   useEffect(() => stop, []);
 
+  const fire = (kind: 'press' | 'tick' | 'strong') => {
+    const r = onPress(); // send first, then buzz
+    buzz(r === false ? 'missed' : kind);
+  };
+
   return (
     <Pressable
-      onPress={
-        release
-          ? () => {
-              buzz(strong ? 'strong' : 'press');
-              onPress();
-            }
-          : undefined
-      }
       onPressIn={() => {
-        if (release) return;
-        buzz(strong ? 'strong' : 'press');
-        onPress();
-        if (repeat)
-          delay.current = setTimeout(
-            () =>
-              (interval.current = setInterval(() => {
-                buzz('tick');
-                onPress();
-              }, 120)),
-            400,
-          );
+        fire(strong ? 'strong' : 'press');
+        if (repeat) delay.current = setTimeout(() => (interval.current = setInterval(() => fire('tick'), 120)), 400);
       }}
       onPressOut={stop}
       style={({ pressed }) => [s.btn, style, pressed && { backgroundColor: C.btnPressed }]}
     >
-      <Text style={[s.btnText, big && { fontSize: 24 }, color && { color }, textStyle]}>{label}</Text>
+      {icon ? (
+        <MaterialCommunityIcons name={icon} size={26} color={color ?? C.text} />
+      ) : (
+        <Text style={[s.btnText, color && { color }, textStyle]}>{label}</Text>
+      )}
     </Pressable>
   );
 }
@@ -531,14 +570,14 @@ const s = StyleSheet.create({
   primary: { backgroundColor: C.accent, borderRadius: 12, paddingVertical: 16, alignItems: 'center' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
-  remote: { flex: 1, paddingHorizontal: 18, paddingTop: 12, paddingBottom: 16, gap: 12 },
+  remote: { flex: 1, paddingHorizontal: 18, paddingTop: 12, paddingBottom: 32, gap: 12 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   tvName: { color: C.text, fontSize: 18, fontWeight: '700' },
   statusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   statusText: { color: C.dim, fontSize: 13 },
+  diagText: { color: C.dim, fontSize: 11, marginTop: 2 },
   power: { flex: 0, width: 48, height: 48, borderRadius: 24 },
-  small: { height: 40, borderRadius: 12 },
 
   row: { flexDirection: 'row', gap: 10, justifyContent: 'space-between' },
   btn: {
@@ -551,7 +590,8 @@ const s = StyleSheet.create({
   },
   btnText: { color: C.text, fontSize: 15, fontWeight: '600' },
 
-  thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 20 },
+  // marginBottom lifts the block clear of the bottom row (on top of the 12px gap).
+  thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 20, marginBottom: 20 },
   ring: { backgroundColor: C.btn },
   dZone: { position: 'absolute', flex: 0, backgroundColor: 'transparent' },
   ok: { position: 'absolute', flex: 0, backgroundColor: '#2A2D36' },
@@ -561,7 +601,6 @@ const s = StyleSheet.create({
   rockMid: { flex: 0, height: 34, backgroundColor: 'transparent', borderRadius: 0 },
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
-  section: { color: C.dim, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
   typeRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   send: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 16 },
 });

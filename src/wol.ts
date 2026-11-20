@@ -9,9 +9,10 @@ export function wakeOnLan(mac: string, ip?: string): Promise<void> {
   for (let i = 0; i < 16; i++) packet.push(...macBytes);
   const bytes = Uint8Array.from(packet);
 
-  // Send to global broadcast and the subnet broadcast (assumes /24).
+  // Global broadcast, subnet broadcast (assumes /24), and unicast to the TV, which still
+  // works while the phone's ARP cache remembers the TV (shortly after it was turned off).
   const targets = ['255.255.255.255'];
-  if (ip) targets.push(ip.replace(/\.\d+$/, '.255'));
+  if (ip) targets.push(ip.replace(/\.\d+$/, '.255'), ip);
 
   return new Promise((resolve, reject) => {
     let finished = false;
@@ -43,8 +44,13 @@ export function wakeOnLan(mac: string, ip?: string): Promise<void> {
         return;
       }
       let pending = targets.length * 3;
-      const done = () => {
-        if (--pending === 0) finish();
+      let sent = 0;
+      let firstErr: Error | undefined;
+      const done = (err?: Error) => {
+        if (err) firstErr ??= err;
+        else sent++;
+        // Succeed if any packet went out; the unicast one can fail on its own.
+        if (--pending === 0) finish(sent ? undefined : firstErr);
       };
       for (let r = 0; r < 3; r++) {
         for (const t of targets) sock.send(bytes, 0, bytes.length, 9, t, done);
