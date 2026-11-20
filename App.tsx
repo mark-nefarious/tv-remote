@@ -134,8 +134,6 @@ function RemoteScreen({
   const [apps, setApps] = useState<TvApp[]>([]);
   const [text, setText] = useState('');
   const [waking, setWaking] = useState(false);
-  const [panel, setPanel] = useState<'none' | 'num' | 'colour'>('none');
-  const toggle = (p: 'num' | 'colour') => setPanel((cur) => (cur === p ? 'none' : p));
   const tvRef = useRef<SamsungTv | null>(null);
   const tvDataRef = useRef(tv);
   tvDataRef.current = tv;
@@ -286,33 +284,6 @@ function RemoteScreen({
         )}
 
         <View style={s.row}>
-          <Btn release label="Source" onPress={() => key('KEY_SOURCE')} style={s.small} />
-          <Btn release label="123" onPress={() => toggle('num')} style={s.small} />
-          <Btn release label="● ● ● ●" onPress={() => toggle('colour')} style={s.small} />
-        </View>
-
-        {panel === 'num' && (
-          <View style={s.numPad}>
-            {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].map((n) => (
-              <Btn release key={n} label={n} onPress={() => key(`KEY_${n}`)} style={s.numKey} />
-            ))}
-          </View>
-        )}
-
-        {panel === 'colour' && (
-          <View style={s.row}>
-            {[
-              ['KEY_RED', C.red],
-              ['KEY_GREEN', C.green],
-              ['KEY_YELLOW', C.amber],
-              ['KEY_CYAN', C.accent],
-            ].map(([k, col]) => (
-              <Btn release key={k} label="" onPress={() => key(k)} style={[s.small, { backgroundColor: col }]} />
-            ))}
-          </View>
-        )}
-
-        <View style={s.row}>
           {SHORTCUTS.map((sc) => {
             const app = apps.find((a) => sc.match.test(a.name)) ?? (sc.id ? { appId: sc.id, appType: 2 } : null);
             return (
@@ -377,6 +348,7 @@ function RemoteScreen({
         <Btn label="↩" onPress={() => key('KEY_RETURN')} big />
         <Btn label="⌂" onPress={() => key('KEY_HOME')} big />
         <Btn label="⏯" onPress={playPause} big />
+        <Btn label="🔇" onPress={() => key('KEY_MUTE')} big />
       </View>
     </View>
   );
@@ -578,8 +550,6 @@ const s = StyleSheet.create({
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
   section: { color: C.dim, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
-  numPad: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center' },
-  numKey: { flex: 0, width: '18%', height: 44, borderRadius: 12 },
   typeRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   send: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 16 },
 });
