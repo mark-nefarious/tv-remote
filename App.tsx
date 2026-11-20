@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -136,63 +139,125 @@ function RemoteScreen({
   const tvRef = useRef<SamsungTv | null>(null);
   const tvDataRef = useRef(tv);
   tvDataRef.current = tv;
+  const onUpdateRef = useRef((next: SavedTv) => {
+    tvDataRef.current = next; // visible to callbacks before the re-render lands
+    onUpdate(next);
+  });
+  // Incremented to cancel an in-flight power-on loop (unmount, second tap).
+  const wakeRun = useRef(0);
 
   useEffect(() => {
+    // Keep the MAC (needed for Wake-on-LAN) and name current; setup may have missed them.
+    const refreshInfo = async () => {
+      const info = await fetchTvInfo(tv.ip);
+      const cur = tvDataRef.current;
+      if (!info || cur.ip !== tv.ip) return;
+      const mac = info.mac || cur.mac;
+      if (mac !== cur.mac || info.name !== cur.name) onUpdateRef.current({ ...cur, mac, name: info.name });
+    };
+
     const remote = new SamsungTv(tv.ip, tv.token, {
-      onStatus: setStatus,
+      onStatus: (st) => {
+        setStatus(st);
+        if (st === 'connected') refreshInfo();
+      },
       onApps: setApps,
-      onToken: (token) => onUpdate({ ...tvDataRef.current, token }),
+      onToken: (token) => onUpdateRef.current({ ...tvDataRef.current, token }),
     });
     tvRef.current = remote;
     remote.connect();
 
+    // A socket left open while the phone sleeps goes half-open and silently eats key presses.
+    // Drop it in the background and always start fresh on return (token is saved, no prompt).
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && !remote.isConnected) remote.connect();
+      if (state === 'active') remote.ensureConnected();
+      else if (state === 'background') {
+        wakeRun.current++;
+        setWaking(false);
+        remote.stop();
+      }
     });
     return () => {
       sub.remove();
-      remote.close();
+      wakeRun.current++;
+      remote.stop();
+      tvRef.current = null;
     };
     // Recreate only when the TV address changes; token updates are handled inside the instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tv.ip]);
 
-  const key = useCallback((k: string) => tvRef.current?.sendKey(k), []);
+  const key = useCallback((k: string) => {
+    const remote = tvRef.current;
+    if (!remote) return;
+    if (remote.isConnected) remote.sendKey(k);
+    else remote.ensureConnected();
+  }, []);
+
+  // Samsung has no documented play/pause toggle key; alternate the two.
+  const playing = useRef(true);
+  const playPause = () => {
+    key(playing.current ? 'KEY_PAUSE' : 'KEY_PLAY');
+    playing.current = !playing.current;
+  };
 
   const power = async () => {
     const remote = tvRef.current;
-    if (!remote) return;
+    if (!remote || waking) return;
     if (remote.isConnected) {
       remote.sendKey('KEY_POWER');
       return;
     }
-    if (!tv.mac) {
+    const { mac, ip } = tvDataRef.current;
+    if (!mac) {
       remote.connect();
       return;
     }
+    const run = ++wakeRun.current;
+    const live = () => wakeRun.current === run;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     setWaking(true);
     try {
-      await wakeOnLan(tv.mac, tv.ip);
-    } catch {}
-    // TV takes a few seconds to boot its network stack.
-    for (let i = 0; i < 10 && !remote.isConnected; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!remote.isConnected) remote.connect();
+      // Poll the cheap HTTP endpoint until the TV's network is up, then open the socket once.
+      // Reconnecting on a timer would abort a slow TLS handshake to a booting TV.
+      for (let i = 0; i < 15 && live(); i++) {
+        if (i % 3 === 0) await wakeOnLan(mac, ip).catch(() => {});
+        if (!live()) return;
+        if (remote.isConnected) return;
+        if (await fetchTvInfo(ip, 1500)) {
+          if (!live()) return;
+          remote.ensureConnected();
+          for (let j = 0; j < 20 && live() && remote.currentStatus === 'connecting'; j++) await sleep(500);
+          return;
+        }
+        await sleep(1500);
+      }
+    } finally {
+      if (live()) setWaking(false);
     }
-    setWaking(false);
   };
+
+  const forget = () =>
+    Alert.alert('Forget this TV?', 'You will need to enter the IP and press Allow on the TV again.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Forget', style: 'destructive', onPress: onForget },
+    ]);
+
+  const { width } = useWindowDimensions();
+  // Ring + two rockers + gaps must fit the screen width (18 padding each side).
+  const ring = Math.max(150, Math.min(196, width - 36 - 2 * 58 - 2 * 8));
 
   const sendText = () => {
     if (!text) return;
-    tvRef.current?.sendText(text);
-    setText('');
+    if (tvRef.current?.sendText(text)) setText('');
+    else tvRef.current?.ensureConnected();
   };
 
   const statusInfo = {
     connected: { color: C.green, label: 'Connected' },
-    connecting: { color: C.amber, label: 'Connecting…' },
+    connecting: { color: C.amber, label: waking ? 'Waking TV…' : 'Connecting…' },
     'waiting-for-allow': { color: C.amber, label: 'Press Allow on your TV' },
-    disconnected: { color: C.red, label: waking ? 'Waking TV…' : 'TV off or unreachable' },
+    disconnected: { color: C.red, label: waking ? 'Waking TV…' : 'TV off or unreachable. Tap to retry' },
     denied: { color: C.red, label: 'TV blocked this phone' },
   }[status];
 
@@ -200,7 +265,7 @@ function RemoteScreen({
     <View style={s.remote}>
       {/* ---- Top: rarely used ---- */}
       <View style={s.header}>
-        <Pressable style={{ flex: 1 }} onPress={() => tvRef.current?.connect()} onLongPress={onForget}>
+        <Pressable style={{ flex: 1 }} onPress={() => tvRef.current?.connect()} onLongPress={forget}>
           <Text style={s.tvName} numberOfLines={1}>
             {tv.name}
           </Text>
@@ -212,76 +277,83 @@ function RemoteScreen({
         <Btn label={waking ? '…' : '⏻'} onPress={power} strong color={C.red} style={s.power} big />
       </View>
 
-      {status === 'denied' && (
-        <Text style={[s.p, { color: C.red }]}>
-          On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device List.
-          Allow this phone, then tap the TV name.
-        </Text>
-      )}
-
-      <View style={s.row}>
-        <Btn label="Source" onPress={() => key('KEY_SOURCE')} style={s.small} />
-        <Btn label="123" onPress={() => toggle('num')} style={s.small} />
-        <Btn label="● ● ● ●" onPress={() => toggle('colour')} style={s.small} />
-      </View>
-
-      {panel === 'num' && (
-        <View style={s.numPad}>
-          {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].map((n) => (
-            <Btn key={n} label={n} onPress={() => key(`KEY_${n}`)} style={s.numKey} />
-          ))}
-        </View>
-      )}
-
-      {panel === 'colour' && (
-        <View style={s.row}>
-          {[
-            ['KEY_RED', C.red],
-            ['KEY_GREEN', C.green],
-            ['KEY_YELLOW', C.amber],
-            ['KEY_CYAN', C.accent],
-          ].map(([k, col]) => (
-            <Btn key={k} label="" onPress={() => key(k)} style={[s.small, { backgroundColor: col }]} />
-          ))}
-        </View>
-      )}
-
-      <View style={s.row}>
-        {SHORTCUTS.map((sc) => {
-          const app = apps.find((a) => sc.match.test(a.name));
-          return (
-            <Btn
-              key={sc.label}
-              label={sc.label}
-              onPress={() => app && tvRef.current?.launchApp(app)}
-              style={[s.small, { backgroundColor: sc.colour }, !app && { opacity: 0.4 }]}
-            />
-          );
-        })}
-      </View>
-
-      <View style={s.typeRow}>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="Type on TV…"
-          placeholderTextColor={C.dim}
-          style={[s.input, { flex: 1, marginBottom: 0, paddingVertical: 10, fontSize: 15 }]}
-          onSubmitEditing={sendText}
-          returnKeyType="send"
-        />
-        {!!text && (
-          <Pressable style={s.send} onPress={sendText}>
-            <Text style={s.primaryText}>Send</Text>
-          </Pressable>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }} keyboardShouldPersistTaps="handled">
+        {status === 'denied' && (
+          <Text style={[s.p, { color: C.red }]}>
+            On the TV: Settings › Connection › External Device Manager › Device Connection Manager › Device List.
+            Allow this phone, then tap the TV name.
+          </Text>
         )}
-      </View>
+
+        <View style={s.row}>
+          <Btn release label="Source" onPress={() => key('KEY_SOURCE')} style={s.small} />
+          <Btn release label="123" onPress={() => toggle('num')} style={s.small} />
+          <Btn release label="● ● ● ●" onPress={() => toggle('colour')} style={s.small} />
+        </View>
+
+        {panel === 'num' && (
+          <View style={s.numPad}>
+            {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].map((n) => (
+              <Btn release key={n} label={n} onPress={() => key(`KEY_${n}`)} style={s.numKey} />
+            ))}
+          </View>
+        )}
+
+        {panel === 'colour' && (
+          <View style={s.row}>
+            {[
+              ['KEY_RED', C.red],
+              ['KEY_GREEN', C.green],
+              ['KEY_YELLOW', C.amber],
+              ['KEY_CYAN', C.accent],
+            ].map(([k, col]) => (
+              <Btn release key={k} label="" onPress={() => key(k)} style={[s.small, { backgroundColor: col }]} />
+            ))}
+          </View>
+        )}
+
+        <View style={s.row}>
+          {SHORTCUTS.map((sc) => {
+            const app = apps.find((a) => sc.match.test(a.name)) ?? (sc.id ? { appId: sc.id, appType: 2 } : null);
+            return (
+              <Btn
+                release
+                key={sc.label}
+                label={sc.label}
+                onPress={() => {
+                  if (!app) return;
+                  if (tvRef.current?.isConnected) tvRef.current.launchApp(app);
+                  else tvRef.current?.ensureConnected();
+                }}
+                style={[s.small, { backgroundColor: sc.colour }, !app && { opacity: 0.4 }]}
+              />
+            );
+          })}
+        </View>
+
+        <View style={s.typeRow}>
+          <TextInput
+            value={text}
+            onChangeText={setText}
+            placeholder="Type on TV…"
+            placeholderTextColor={C.dim}
+            style={[s.input, { flex: 1, marginBottom: 0, paddingVertical: 10, fontSize: 15 }]}
+            onSubmitEditing={sendText}
+            returnKeyType="send"
+          />
+          {!!text && (
+            <Pressable style={s.send} onPress={sendText}>
+              <Text style={s.primaryText}>Send</Text>
+            </Pressable>
+          )}
+        </View>
+      </ScrollView>
 
       {/* ---- Bottom: thumb zone ---- */}
-      <View style={{ flex: 1 }} />
 
       <View style={s.thumb}>
         <Rocker
+          size={ring}
           up={() => key('KEY_CHUP')}
           down={() => key('KEY_CHDOWN')}
           mid={() => key('KEY_CH_LIST')}
@@ -289,8 +361,9 @@ function RemoteScreen({
           downLabel="﹀"
           midLabel="CH"
         />
-        <DPad onKey={key} />
+        <DPad onKey={key} size={ring} />
         <Rocker
+          size={ring}
           up={() => key('KEY_VOLUP')}
           down={() => key('KEY_VOLDOWN')}
           mid={() => key('KEY_MUTE')}
@@ -303,33 +376,45 @@ function RemoteScreen({
       <View style={s.row}>
         <Btn label="↩" onPress={() => key('KEY_RETURN')} big />
         <Btn label="⌂" onPress={() => key('KEY_HOME')} big />
-        <Btn label="⏯" onPress={() => key('KEY_PLAY_BACK')} big />
+        <Btn label="⏯" onPress={playPause} big />
       </View>
     </View>
   );
 }
 
 // Matched against the TV's installed app names, so IDs never need hard-coding.
-const SHORTCUTS = [
-  { label: 'Netflix', match: /netflix/i, colour: '#B20710' },
+// `id` is a fallback for firmware that never answers the installed-apps request.
+const SHORTCUTS: { label: string; match: RegExp; colour: string; id?: string }[] = [
+  { label: 'Netflix', match: /netflix/i, colour: '#B20710', id: '3201907018807' },
   { label: 'TVNZ+', match: /tvnz/i, colour: '#1E3A8A' },
   { label: 'Stremio', match: /stremio/i, colour: '#5B3FA8' },
 ];
 
 /* ---------------- D-pad ---------------- */
 
-const RING = 196;
-function DPad({ onKey }: { onKey: (k: string) => void }) {
+function DPad({ onKey, size }: { onKey: (k: string) => void; size: number }) {
+  const z = Math.round(size * 0.35);
+  const ok = Math.round(size * 0.47);
   const zone = (k: string, label: string, pos: object) => (
-    <Btn label={label} onPress={() => onKey(k)} repeat style={[s.dZone, pos]} textStyle={{ color: C.dim }} />
+    <Btn
+      label={label}
+      onPress={() => onKey(k)}
+      repeat
+      style={[s.dZone, { width: z, height: z, borderRadius: z / 2 }, pos]}
+      textStyle={{ color: C.dim }}
+    />
   );
   return (
-    <View style={s.ring}>
-      {zone('KEY_UP', '▲', { top: 0, left: RING / 2 - 34 })}
-      {zone('KEY_DOWN', '▼', { bottom: 0, left: RING / 2 - 34 })}
-      {zone('KEY_LEFT', '◀', { left: 0, top: RING / 2 - 34 })}
-      {zone('KEY_RIGHT', '▶', { right: 0, top: RING / 2 - 34 })}
-      <Btn label="OK" onPress={() => onKey('KEY_ENTER')} style={s.ok} />
+    <View style={[s.ring, { width: size, height: size, borderRadius: size / 2 }]}>
+      {zone('KEY_UP', '▲', { top: 0, left: size / 2 - z / 2 })}
+      {zone('KEY_DOWN', '▼', { bottom: 0, left: size / 2 - z / 2 })}
+      {zone('KEY_LEFT', '◀', { left: 0, top: size / 2 - z / 2 })}
+      {zone('KEY_RIGHT', '▶', { right: 0, top: size / 2 - z / 2 })}
+      <Btn
+        label="OK"
+        onPress={() => onKey('KEY_ENTER')}
+        style={[s.ok, { width: ok, height: ok, borderRadius: ok / 2, top: size / 2 - ok / 2, left: size / 2 - ok / 2 }]}
+      />
     </View>
   );
 }
@@ -337,6 +422,7 @@ function DPad({ onKey }: { onKey: (k: string) => void }) {
 /* ---------------- Rocker ---------------- */
 
 function Rocker(p: {
+  size: number;
   up: () => void;
   down: () => void;
   mid: () => void;
@@ -345,7 +431,7 @@ function Rocker(p: {
   midLabel: string;
 }) {
   return (
-    <View style={s.rocker}>
+    <View style={[s.rocker, { height: p.size }]}>
       <Btn label={p.upLabel} onPress={p.up} repeat style={s.rockBtn} big />
       <Btn label={p.midLabel} onPress={p.mid} style={s.rockMid} textStyle={s.rockLabel} />
       <Btn label={p.downLabel} onPress={p.down} repeat style={s.rockBtn} big />
@@ -380,6 +466,7 @@ function buzz(kind: 'press' | 'tick' | 'strong') {
 function Btn({
   label,
   onPress,
+  release,
   repeat,
   strong,
   big,
@@ -389,6 +476,9 @@ function Btn({
 }: {
   label: string;
   onPress: () => void;
+  // Fire on release instead of touch-down. Used inside the ScrollView so a scroll
+  // gesture that starts on a button doesn't send a key.
+  release?: boolean;
   repeat?: boolean;
   strong?: boolean;
   big?: boolean;
@@ -408,7 +498,16 @@ function Btn({
 
   return (
     <Pressable
+      onPress={
+        release
+          ? () => {
+              buzz(strong ? 'strong' : 'press');
+              onPress();
+            }
+          : undefined
+      }
       onPressIn={() => {
+        if (release) return;
         buzz(strong ? 'strong' : 'press');
         onPress();
         if (repeat)
@@ -469,20 +568,11 @@ const s = StyleSheet.create({
   btnText: { color: C.text, fontSize: 15, fontWeight: '600' },
 
   thumb: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  ring: { width: RING, height: RING, borderRadius: RING / 2, backgroundColor: C.btn },
-  dZone: { position: 'absolute', flex: 0, width: 68, height: 68, borderRadius: 34, backgroundColor: 'transparent' },
-  ok: {
-    position: 'absolute',
-    flex: 0,
-    width: 92,
-    height: 92,
-    borderRadius: 46,
-    top: RING / 2 - 46,
-    left: RING / 2 - 46,
-    backgroundColor: '#2A2D36',
-  },
+  ring: { backgroundColor: C.btn },
+  dZone: { position: 'absolute', flex: 0, backgroundColor: 'transparent' },
+  ok: { position: 'absolute', flex: 0, backgroundColor: '#2A2D36' },
 
-  rocker: { width: 58, height: RING, backgroundColor: '#3A3D45', borderRadius: 18, overflow: 'hidden' },
+  rocker: { width: 58, backgroundColor: '#3A3D45', borderRadius: 18, overflow: 'hidden' },
   rockBtn: { flex: 1, backgroundColor: 'transparent', borderRadius: 0 },
   rockMid: { flex: 0, height: 34, backgroundColor: 'transparent', borderRadius: 0 },
   rockLabel: { color: C.dim, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
