@@ -5,7 +5,9 @@
 import TcpSocket from 'react-native-tcp-socket';
 import { Buffer } from 'buffer';
 
-const DEFAULT_MEDIA_RECEIVER = 'CC1AD845';
+// The YouTube receiver: launching it is exactly what casting from the YouTube app does,
+// and on this TV it sends both "turn on" and "switch to me" over HDMI-CEC.
+const YOUTUBE_RECEIVER = '233637DE';
 const NS_CONNECTION = 'urn:x-cast:com.google.cast.tp.connection';
 const NS_RECEIVER = 'urn:x-cast:com.google.cast.receiver';
 
@@ -74,7 +76,7 @@ function decodeCastMessage(buf: Buffer): { namespace: string; payload: string } 
 
 /* ---------- launch (wake + switch input) ---------- */
 
-export function wakeViaChromecast(ip: string, timeoutMs = 8000): Promise<void> {
+function launchOnce(ip: string, timeoutMs = 8000): Promise<void> {
   return new Promise((resolve, reject) => {
     let done = false;
     let pending = Buffer.alloc(0);
@@ -83,7 +85,7 @@ export function wakeViaChromecast(ip: string, timeoutMs = 8000): Promise<void> {
       { host: ip, port: 8009, tlsCheckValidity: false, connectTimeout: 4000 } as any,
       () => {
         socket.write(encodeCastMessage(NS_CONNECTION, { type: 'CONNECT' }));
-        socket.write(encodeCastMessage(NS_RECEIVER, { type: 'LAUNCH', appId: DEFAULT_MEDIA_RECEIVER, requestId: 1 }));
+        socket.write(encodeCastMessage(NS_RECEIVER, { type: 'LAUNCH', appId: YOUTUBE_RECEIVER, requestId: 1 }));
       },
     );
     const finish = (err?: Error) => {
@@ -108,13 +110,40 @@ export function wakeViaChromecast(ip: string, timeoutMs = 8000): Promise<void> {
           const p = JSON.parse(msg.payload);
           if (p.type === 'LAUNCH_ERROR') finish(new Error(`Chromecast refused: ${p.reason ?? 'unknown'}`));
           const apps: any[] = p.status?.applications ?? [];
-          if (p.type === 'RECEIVER_STATUS' && apps.some((a) => a.appId === DEFAULT_MEDIA_RECEIVER)) finish();
+          if (p.type === 'RECEIVER_STATUS' && apps.some((a) => a.appId === YOUTUBE_RECEIVER)) finish();
         } catch {}
       }
     });
     socket.on('error', (e: Error) => finish(e));
     socket.on('close', () => finish(new Error('Chromecast closed the connection')));
   });
+}
+
+export type CastStep = 'connecting' | 'sent' | 'retrying' | 'done';
+
+/** Launch YouTube on the Chromecast, retrying for up to `totalMs` if it's slow to answer. */
+export async function wakeViaChromecast(
+  ip: string,
+  onStep: (step: CastStep, attempt: number) => void = () => {},
+  isLive: () => boolean = () => true,
+  totalMs = 20000,
+): Promise<void> {
+  const start = Date.now();
+  let attempt = 0;
+  let lastErr: unknown;
+  while (isLive() && Date.now() - start < totalMs) {
+    attempt++;
+    onStep(attempt === 1 ? 'connecting' : 'retrying', attempt);
+    try {
+      await launchOnce(ip);
+      onStep('done', attempt);
+      return;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Chromecast did not respond');
 }
 
 /* ---------- discovery ---------- */

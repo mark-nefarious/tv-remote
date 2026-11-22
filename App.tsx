@@ -179,10 +179,13 @@ function RemoteScreen({
   };
 
   const castSwitch = async (ip: string) => {
-    setCastMsg('Switching to Chromecast…');
+    setCastMsg(`Chromecast found at ${ip}. Sending request…`);
     try {
-      await wakeViaChromecast(ip);
-      setCastMsg('');
+      await wakeViaChromecast(ip, (step, n) =>
+        setCastMsg(step === 'retrying' ? `Chromecast slow to answer. Retrying (attempt ${n})…` : `Chromecast at ${ip}: sending request…`),
+      );
+      setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
+      setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
     } catch (e: any) {
       setCastMsg(`Chromecast didn't respond: ${e?.message ?? e}`);
     }
@@ -291,14 +294,24 @@ function RemoteScreen({
     setWakeMsg(`Sending wake signal to ${mac}…`);
 
     // Main wake path: ask the Chromecast to wake the TV over HDMI-CEC. Works from deep standby.
-    const cast = { state: 'pending' as 'pending' | 'ok' | 'none' | 'failed' };
+    const cast = { state: 'pending' as 'pending' | 'ok' | 'none' | 'failed', step: 'Looking for the Chromecast…', err: '' };
     (async () => {
       const castIp = await resolveCast(false).catch(() => null);
       if (!live()) return;
       if (!castIp) return void (cast.state = 'none');
-      cast.state = await wakeViaChromecast(castIp).then(
+      cast.step = `Chromecast found at ${castIp}. Sending wake request…`;
+      cast.state = await wakeViaChromecast(
+        castIp,
+        (step, n) => {
+          if (step === 'retrying') cast.step = `Chromecast slow to answer. Retrying (attempt ${n})…`;
+        },
+        live,
+      ).then(
         () => 'ok' as const,
-        () => 'failed' as const,
+        (e) => {
+          cast.err = String(e?.message ?? e);
+          return 'failed' as const;
+        },
       );
     })();
     let rescanned = false;
@@ -323,7 +336,9 @@ function RemoteScreen({
         if (!answered) {
           setWakeMsg(
             cast.state === 'ok'
-              ? `Chromecast is waking the TV… ${secs()}s`
+              ? `Chromecast accepted. TV waking… ${secs()}s`
+              : cast.state === 'pending'
+              ? `${cast.step} ${secs()}s`
               : wolOk
               ? `Wake signal sent to ${mac}. Waiting for TV… ${secs()}s`
               : wolErr
@@ -368,7 +383,7 @@ function RemoteScreen({
           cast.state === 'none'
             ? "TV didn't respond, and no Chromecast was found to wake it. Is the Chromecast powered from the wall?"
             : cast.state === 'failed'
-              ? "TV didn't respond, and the Chromecast didn't accept the wake request."
+              ? `TV didn't respond. Chromecast error: ${cast.err}`
               : `Sent to ${mac} but the TV didn't respond.`,
         );
       } else {
