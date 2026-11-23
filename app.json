@@ -39,7 +39,8 @@
           "receiverAppId": "233637DE",
           "expandedController": false
         }
-      ]
+      ],
+      "./plugins/withCastVersion"
     ]
   }
 }
