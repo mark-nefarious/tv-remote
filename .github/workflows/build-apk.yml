@@ -1,8 +1,12 @@
 name: Build APK
 
+# main = the working remote everyone uses: every push publishes a release, which the
+#        in-app "Update available" banner picks up.
+# dev  = work in progress: every push publishes a pre-release (dev-N) for testing.
+#        Pre-releases never trigger the update banner.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
@@ -63,10 +67,19 @@ jobs:
           path: tv-remote.apk
           retention-days: 14
 
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: TV Remote build ${{ github.run_number }}
           files: tv-remote.apk
           make_latest: true
+
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_number }}
+          name: TV Remote dev build ${{ github.run_number }} (testing)
+          files: tv-remote.apk
+          prerelease: true
+          make_latest: false

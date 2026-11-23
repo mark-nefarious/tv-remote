@@ -2,6 +2,11 @@
 
 A phone remote for Samsung Tizen TVs (2016 and newer), controlled over your home Wi-Fi.
 
+## Branches
+
+- **main**: the working remote. Every push builds and publishes a release; both phones get the "Update available" banner.
+- **dev**: work in progress. Every push builds a pre-release called `dev-N` for testing. It never triggers the banner. Merge dev into main when a change is tested.
+
 ## Build the APK (from your phone)
 
 Every push to `main` builds the APK on GitHub Actions (about 10 minutes) and publishes it as a Release.
