@@ -161,6 +161,8 @@ function RemoteScreen({
   const [castPicker, setCastPicker] = useState<CastDevice[] | null>(null);
   const [castMsg, setCastMsg] = useState('');
   const pickerShown = useRef(false);
+  const [castAddrOpen, setCastAddrOpen] = useState(false);
+  const [castAddr, setCastAddr] = useState('');
   const tvScanDone = useRef(false);
 
   // Find the Chromecast: saved address first, then scan the network.
@@ -237,7 +239,7 @@ function RemoteScreen({
     if (r === 'ok') {
       setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
       setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
-    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast on your Wi-Fi.");
+    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast. Long-press the Chromecast button to enter its address.");
     else if (r !== 'picker') setCastMsg(`Chromecast didn't respond (${r}).`);
   };
 
@@ -334,6 +336,7 @@ function RemoteScreen({
     const started = Date.now();
     const secs = () => Math.round((Date.now() - started) / 1000);
     setWaking(true);
+    setCastMsg('');
     setWakeMsg(`Sending wake signal to ${mac}…`);
 
     // Main wake path: ask the Chromecast to wake the TV over HDMI-CEC. Works from deep standby.
@@ -520,7 +523,24 @@ function RemoteScreen({
           </Pressable>
         )}
 
-        <Btn icon="cast" label="Chromecast" onPress={chromecastButton} style={s.castBtn} />
+        <Pressable
+          onPress={() => {
+            buzz('press');
+            chromecastButton();
+          }}
+          onLongPress={() => {
+            buzz('strong');
+            setCastAddr(tvDataRef.current.castIp || '192.168.1.217');
+            setCastAddrOpen(true);
+          }}
+          delayLongPress={500}
+          style={({ pressed }) => [s.btn, s.castBtn, pressed && { backgroundColor: C.btnPressed }]}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <MaterialCommunityIcons name="cast" size={22} color={C.text} />
+            <Text style={s.btnText}>Chromecast</Text>
+          </View>
+        </Pressable>
         {!!castMsg && <Text style={[s.p, { color: C.amber }]}>{castMsg}</Text>}
 
         {!!wakeMsg && status !== 'connected' && <Text style={[s.p, { color: C.amber }]}>{wakeMsg}</Text>}
@@ -533,6 +553,40 @@ function RemoteScreen({
         )}
 
       </ScrollView>
+
+      <Modal visible={castAddrOpen} transparent animationType="fade" onRequestClose={() => setCastAddrOpen(false)}>
+        <View style={s.modalBg}>
+          <View style={s.modal}>
+            <Text style={s.tvName}>Chromecast address</Text>
+            <Text style={s.statusText}>Its IP address on your Wi-Fi, e.g. 192.168.1.217</Text>
+            <TextInput
+              value={castAddr}
+              onChangeText={setCastAddr}
+              keyboardType="numbers-and-punctuation"
+              autoFocus
+              selectTextOnFocus
+              style={s.input}
+            />
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 16 }}>
+              <Pressable onPress={() => setCastAddrOpen(false)} style={{ padding: 8 }}>
+                <Text style={s.statusText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  const ip = castAddr.trim();
+                  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return setCastMsg('That isn\'t a valid IP address.');
+                  setCastAddrOpen(false);
+                  onUpdateRef.current({ ...tvDataRef.current, castIp: ip, castName: undefined });
+                  setCastMsg(`Chromecast address saved: ${ip}. Tap Chromecast to test.`);
+                }}
+                style={{ padding: 8 }}
+              >
+                <Text style={[s.btnText, { color: C.accent }]}>Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={!!castPicker} transparent animationType="fade" onRequestClose={() => setCastPicker(null)}>
         <View style={s.modalBg}>

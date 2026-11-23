@@ -114,7 +114,8 @@ function launchOnce(ip: string, timeoutMs = 10000): Promise<void> {
         } catch {}
       }
     });
-    socket.on('error', (e: Error) => finish(e));
+    socket.on('error', (e: any) => finish(new Error(`socket error: ${e?.message ?? JSON.stringify(e)}`)));
+    socket.on('timeout', () => finish(new Error('connect timed out')));
     socket.on('close', () => finish(new Error('Chromecast closed the connection')));
   });
 }
