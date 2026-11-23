@@ -24,7 +24,7 @@ import { SamsungTv, TvStatus, fetchTvInfo } from './src/samsung';
 import { SavedTv, clearTv, loadTv, saveTv } from './src/storage';
 import { wakeOnLan } from './src/wol';
 import { Update, checkForUpdate } from './src/update';
-import { CastTarget, discoverCastDevices, startCastSession } from './src/cast';
+import { CastTarget, discoverCastDevices, pickViaCastDialog, startCastSession } from './src/cast';
 import { findTvByMac } from './src/discover';
 
 const C = {
@@ -158,63 +158,61 @@ function RemoteScreen({
   });
   // Incremented to cancel an in-flight power-on loop (unmount, second tap).
   const wakeRun = useRef(0);
-  const [castPicker, setCastPicker] = useState<CastTarget[] | null>(null);
   const [castMsg, setCastMsg] = useState('');
   const tvScanDone = useRef(false);
 
-  // Pick this TV's Chromecast: the saved one (by name), else the only one on the Wi-Fi.
-  const resolveCast = async (
-    interactive: boolean,
-    say: (m: string) => void,
-  ): Promise<CastTarget | 'picker' | 'multiple' | null> => {
-    say('Looking for the Chromecast…');
-    const found = await discoverCastDevices();
-    const saved = tvDataRef.current.castName;
-    const pick = (saved && found.find((d) => d.name === saved)) || (found.length === 1 ? found[0] : undefined);
-    if (pick) {
-      if (pick.name !== saved) onUpdateRef.current({ ...tvDataRef.current, castName: pick.name });
-      return pick;
-    }
-    if (found.length > 1) {
-      if (!interactive) return 'multiple';
-      setCastPicker(found);
-      return 'picker';
-    }
-    return null;
-  };
-
-  const castTo = async (target: CastTarget, say: (m: string) => void): Promise<string> => {
-    say(`Starting cast on ${target.name}…`);
-    try {
-      await startCastSession(target.deviceId);
-      return 'ok';
-    } catch (e: any) {
-      return String(e?.message ?? e);
-    }
-  };
-
-  // Wake/switch via the Chromecast, using Google's Cast SDK.
+  // Wake/switch via the Chromecast, using Google's Cast SDK:
+  // 1. find the saved Chromecast (or the only one) and start a session on it;
+  // 2. if that can't be done, open Google's own cast picker so the user taps it once.
   const castWake = async (
-    interactive: boolean,
+    _interactive: boolean,
     say: (m: string) => void,
     live: () => boolean = () => true,
   ): Promise<string> => {
-    const target = await resolveCast(interactive, say);
+    const saved = tvDataRef.current.castName;
+    let target: CastTarget | undefined;
+    let why = '';
+    try {
+      say('Looking for the Chromecast…');
+      const found = await discoverCastDevices();
+      target = (saved && found.find((d) => d.name === saved)) || (found.length === 1 ? found[0] : undefined);
+      if (!target) why = found.length ? `${found.length} Chromecasts found` : 'none found automatically';
+    } catch (e: any) {
+      why = `search error: ${e?.message ?? e}`;
+    }
     if (!live()) return 'cancelled';
-    if (target === 'picker' || target === 'multiple') return target;
-    if (!target) return 'none';
-    return castTo(target, say);
+
+    if (target) {
+      say(`Starting cast on ${target.name}…`);
+      try {
+        await startCastSession(target.deviceId);
+        if (target.name !== saved) onUpdateRef.current({ ...tvDataRef.current, castName: target.name });
+        return 'ok';
+      } catch (e: any) {
+        why = `session error on ${target.name}: ${e?.message ?? e}`;
+      }
+    }
+    if (!live()) return 'cancelled';
+
+    say(`Chromecast not reached (${why}). Opening Google's cast picker: tap your Chromecast.`);
+    try {
+      const picked = await pickViaCastDialog();
+      if (picked.name) onUpdateRef.current({ ...tvDataRef.current, castName: picked.name });
+      return 'ok';
+    } catch (e: any) {
+      return `${why}; cast picker: ${e?.message ?? e}`;
+    }
   };
 
   const reportCast = (r: string) => {
     if (r === 'ok') {
       setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
       setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
-    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast on your Wi-Fi.");
-    else if (r !== 'picker') setCastMsg(`Chromecast didn't respond (${r}).`);
+    } else if (r !== 'cancelled') setCastMsg(`Chromecast didn't respond (${r}).`);
   };
 
-  const chromecastButton = async () => reportCast(await castWake(true, setCastMsg));
+  const chromecastButton = async () =>
+    reportCast(await castWake(true, setCastMsg).catch((e) => `unexpected error: ${e?.message ?? e}`));
 
   useEffect(() => {
     // Keep the MAC (needed for Wake-on-LAN) and name current; setup may have missed them.
@@ -312,7 +310,7 @@ function RemoteScreen({
       const r = await castWake(false, (m) => (cast.step = m), live).catch((e) => String(e?.message ?? e));
       if (!live()) return;
       if (r === 'ok') cast.state = 'ok';
-      else if (r === 'none' || r === 'picker' || r === 'multiple') cast.state = 'none';
+      else if (r === 'cancelled') cast.state = 'none';
       else {
         cast.err = r;
         cast.state = 'failed';
@@ -515,29 +513,6 @@ function RemoteScreen({
 
       </ScrollView>
 
-      <Modal visible={!!castPicker} transparent animationType="fade" onRequestClose={() => setCastPicker(null)}>
-        <View style={s.modalBg}>
-          <View style={s.modal}>
-            <Text style={s.tvName}>Which Chromecast is on this TV?</Text>
-            {castPicker?.map((d) => (
-              <Pressable
-                key={d.deviceId}
-                style={s.pickRow}
-                onPress={() => {
-                  setCastPicker(null);
-                  onUpdateRef.current({ ...tvDataRef.current, castName: d.name });
-                  castTo(d, setCastMsg).then(reportCast);
-                }}
-              >
-                <Text style={s.btnText}>{d.name}</Text>
-              </Pressable>
-            ))}
-            <Pressable onPress={() => setCastPicker(null)} style={{ alignSelf: 'flex-end', padding: 8 }}>
-              <Text style={s.statusText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
 
       {/* ---- Bottom: thumb zone ---- */}
 

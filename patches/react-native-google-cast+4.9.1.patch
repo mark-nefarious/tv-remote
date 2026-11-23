@@ -1,0 +1,49 @@
+diff --git a/node_modules/react-native-google-cast/android/src/main/java/com/reactnative/googlecast/api/RNGCDiscoveryManager.java b/node_modules/react-native-google-cast/android/src/main/java/com/reactnative/googlecast/api/RNGCDiscoveryManager.java
+index aa910d5..12e2d2a 100644
+--- a/node_modules/react-native-google-cast/android/src/main/java/com/reactnative/googlecast/api/RNGCDiscoveryManager.java
++++ b/node_modules/react-native-google-cast/android/src/main/java/com/reactnative/googlecast/api/RNGCDiscoveryManager.java
+@@ -57,6 +57,9 @@ public class RNGCDiscoveryManager
+     super(reactContext);
+ 
+     reactContext.addLifecycleEventListener(this);
++    // Patched: the module is created lazily, after the activity has already resumed,
++    // so onHostResume never fired and nothing was searching. Attach straight away.
++    attachDiscovery();
+   }
+ 
+   @Override
+@@ -120,21 +123,31 @@ public class RNGCDiscoveryManager
+ 
+   @Override
+   public void onHostResume() {
++    attachDiscovery();
++  }
++
++  // Patched: request active discovery (the flag YouTube's cast button uses) instead of a
++  // passive listen, so Chromecasts show up without a Cast button on screen.
++  private void attachDiscovery() {
+     final ReactApplicationContext context = getReactApplicationContext();
+ 
+     if (mListenersAttached) return;
++    mListenersAttached = true;
+ 
+     context.runOnUiQueueThread(new Runnable() {
+       @Override
+       public void run() {
+         CastContext castContext = RNGCCastContext.getSharedInstance(context);
+-        if (castContext == null) return;
++        if (castContext == null) {
++          mListenersAttached = false;
++          return;
++        }
+ 
+         MediaRouteSelector selector = castContext.getMergedSelector();
+-        MediaRouter.getInstance(context).addCallback(selector, mediaRouterCallback);
++        MediaRouter.getInstance(context).addCallback(
++          selector, mediaRouterCallback, MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY);
+       }
+     });
+-    mListenersAttached = true;
+   }
+ 
+   @Override
