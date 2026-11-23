@@ -76,13 +76,13 @@ function decodeCastMessage(buf: Buffer): { namespace: string; payload: string } 
 
 /* ---------- launch (wake + switch input) ---------- */
 
-function launchOnce(ip: string, timeoutMs = 8000): Promise<void> {
+function launchOnce(ip: string, timeoutMs = 10000): Promise<void> {
   return new Promise((resolve, reject) => {
     let done = false;
     let pending = Buffer.alloc(0);
     const socket = TcpSocket.connectTLS(
       // The Chromecast uses a device certificate that won't validate against public CAs.
-      { host: ip, port: 8009, tlsCheckValidity: false, connectTimeout: 4000 } as any,
+      { host: ip, port: 8009, tlsCheckValidity: false, connectTimeout: 5000 } as any,
       () => {
         socket.write(encodeCastMessage(NS_CONNECTION, { type: 'CONNECT' }));
         socket.write(encodeCastMessage(NS_RECEIVER, { type: 'LAUNCH', appId: YOUTUBE_RECEIVER, requestId: 1 }));
@@ -148,7 +148,7 @@ export async function wakeViaChromecast(
 
 /* ---------- discovery ---------- */
 
-function portOpen(ip: string, port: number, timeoutMs = 700): Promise<boolean> {
+function portOpen(ip: string, port: number, timeoutMs = 2500): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false;
     const end = (ok: boolean) => {
@@ -181,7 +181,7 @@ async function castName(ip: string): Promise<string> {
 }
 
 export function isCastReachable(ip: string) {
-  return portOpen(ip, 8009, 1200);
+  return portOpen(ip, 8009, 3000);
 }
 
 /** Scan the /24 around `nearIp` for Cast devices (port 8009). */
@@ -189,8 +189,8 @@ export async function findCastDevices(nearIp: string, exclude: string[] = []): P
   const prefix = nearIp.replace(/\.\d+$/, '.');
   const hosts = Array.from({ length: 254 }, (_, i) => prefix + (i + 1)).filter((h) => !exclude.includes(h));
   const found: string[] = [];
-  for (let i = 0; i < hosts.length; i += 32) {
-    const batch = hosts.slice(i, i + 32);
+  for (let i = 0; i < hosts.length; i += 64) {
+    const batch = hosts.slice(i, i + 64);
     const open = await Promise.all(batch.map((h) => portOpen(h, 8009)));
     batch.forEach((h, j) => open[j] && found.push(h));
   }

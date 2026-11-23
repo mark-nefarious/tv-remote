@@ -24,7 +24,7 @@ import { SamsungTv, TvStatus, fetchTvInfo } from './src/samsung';
 import { SavedTv, clearTv, loadTv, saveTv } from './src/storage';
 import { wakeOnLan } from './src/wol';
 import { Update, checkForUpdate } from './src/update';
-import { CastDevice, findCastDevices, isCastReachable, wakeViaChromecast } from './src/chromecast';
+import { CastDevice, findCastDevices, wakeViaChromecast } from './src/chromecast';
 import { findTvByMac } from './src/discover';
 
 const C = {
@@ -160,42 +160,85 @@ function RemoteScreen({
   const wakeRun = useRef(0);
   const [castPicker, setCastPicker] = useState<CastDevice[] | null>(null);
   const [castMsg, setCastMsg] = useState('');
+  const pickerShown = useRef(false);
   const tvScanDone = useRef(false);
 
   // Find the Chromecast: saved address first, then scan the network.
   // `interactive` shows a picker when several Cast devices are found.
   const resolveCast = async (interactive: boolean): Promise<string | null> => {
     const cur = tvDataRef.current;
-    if (cur.castIp && (await isCastReachable(cur.castIp))) return cur.castIp;
-    const found = await findCastDevices(cur.ip, [cur.ip]);
+    // A sleeping Chromecast is slow to answer, so the saved address is trusted as-is;
+    // the wake call itself retries. Scanning is only for when nothing is saved yet.
+    if (cur.castIp) return cur.castIp;
+    return scanForCast(interactive);
+  };
+
+  const scanForCast = async (interactive: boolean): Promise<string | null> => {
+    const cur = tvDataRef.current;
+    const found = await findCastDevices(cur.ip, [cur.ip, ...(cur.castIp ? [cur.castIp] : [])]);
     const byName = cur.castName ? found.find((d) => d.name === cur.castName) : undefined;
     const pick = byName ?? (found.length === 1 ? found[0] : undefined);
     if (pick) {
       onUpdateRef.current({ ...tvDataRef.current, castIp: pick.ip, castName: pick.name });
       return pick.ip;
     }
-    if (interactive && found.length > 1) setCastPicker(found);
+    if (interactive && found.length > 1) {
+      pickerShown.current = true;
+      setCastPicker(found);
+    }
     return null;
   };
 
-  const castSwitch = async (ip: string) => {
-    setCastMsg(`Chromecast found at ${ip}. Sending request…`);
-    try {
-      await wakeViaChromecast(ip, (step, n) =>
-        setCastMsg(step === 'retrying' ? `Chromecast slow to answer. Retrying (attempt ${n})…` : `Chromecast at ${ip}: sending request…`),
+  // Wake/switch via the Chromecast. Tries the saved address (with retries), then rescans once.
+  const castWake = async (
+    interactive: boolean,
+    say: (m: string) => void,
+    live: () => boolean = () => true,
+  ): Promise<'ok' | 'none' | 'picker' | string> => {
+    pickerShown.current = false;
+    let ip = await resolveCast(interactive);
+    if (!ip) return pickerShown.current ? 'picker' : 'none';
+    const attempt = async (target: string) => {
+      say(`Sending request to Chromecast at ${target}…`);
+      await wakeViaChromecast(
+        target,
+        (step, n) => step === 'retrying' && say(`Chromecast at ${target} slow to answer. Retrying (attempt ${n})…`),
+        live,
       );
-      setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
-      setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
+    };
+    try {
+      await attempt(ip);
+      return 'ok';
     } catch (e: any) {
-      setCastMsg(`Chromecast didn't respond: ${e?.message ?? e}`);
+      if (!live()) return String(e?.message ?? e);
+      say(`No answer from ${ip}. Searching the network for the Chromecast…`);
+      pickerShown.current = false;
+      const newIp = await scanForCast(interactive);
+      if (pickerShown.current) return 'picker';
+      if (!newIp || newIp === ip) return `no answer from ${ip}: ${e?.message ?? e}`;
+      ip = newIp;
+      try {
+        await attempt(ip);
+        return 'ok';
+      } catch (e2: any) {
+        return `no answer from ${ip}: ${e2?.message ?? e2}`;
+      }
     }
   };
 
+  const castSwitch = async (ip: string) => {
+    onUpdateRef.current({ ...tvDataRef.current, castIp: ip });
+    await chromecastButton();
+  };
+
   const chromecastButton = async () => {
-    setCastMsg('Looking for the Chromecast…');
-    const ip = await resolveCast(true);
-    if (ip) await castSwitch(ip);
-    else setCastMsg((m) => (m.startsWith('Looking') ? "Couldn't find a Chromecast on your Wi-Fi." : m));
+    setCastMsg('Contacting the Chromecast…');
+    const r = await castWake(true, setCastMsg);
+    if (r === 'ok') {
+      setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
+      setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
+    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast on your Wi-Fi.");
+    else if (r !== 'picker') setCastMsg(`Chromecast didn't respond (${r}).`);
   };
 
   // First run after this update: quietly find and remember the Chromecast.
@@ -296,23 +339,14 @@ function RemoteScreen({
     // Main wake path: ask the Chromecast to wake the TV over HDMI-CEC. Works from deep standby.
     const cast = { state: 'pending' as 'pending' | 'ok' | 'none' | 'failed', step: 'Looking for the Chromecast…', err: '' };
     (async () => {
-      const castIp = await resolveCast(false).catch(() => null);
+      const r = await castWake(false, (m) => (cast.step = m), live).catch((e) => String(e?.message ?? e));
       if (!live()) return;
-      if (!castIp) return void (cast.state = 'none');
-      cast.step = `Chromecast found at ${castIp}. Sending wake request…`;
-      cast.state = await wakeViaChromecast(
-        castIp,
-        (step, n) => {
-          if (step === 'retrying') cast.step = `Chromecast slow to answer. Retrying (attempt ${n})…`;
-        },
-        live,
-      ).then(
-        () => 'ok' as const,
-        (e) => {
-          cast.err = String(e?.message ?? e);
-          return 'failed' as const;
-        },
-      );
+      if (r === 'ok') cast.state = 'ok';
+      else if (r === 'none' || r === 'picker') cast.state = 'none';
+      else {
+        cast.err = r;
+        cast.state = 'failed';
+      }
     })();
     let rescanned = false;
 
@@ -664,7 +698,12 @@ function Btn({
       onPressOut={stop}
       style={({ pressed }) => [s.btn, style, pressed && { backgroundColor: C.btnPressed }]}
     >
-      {icon ? (
+      {icon && label ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <MaterialCommunityIcons name={icon} size={22} color={color ?? C.text} />
+          <Text style={[s.btnText, color && { color }, textStyle]}>{label}</Text>
+        </View>
+      ) : icon ? (
         <MaterialCommunityIcons name={icon} size={26} color={color ?? C.text} />
       ) : (
         <Text style={[s.btnText, color && { color }, textStyle]}>{label}</Text>
