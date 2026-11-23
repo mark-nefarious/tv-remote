@@ -24,7 +24,7 @@ import { SamsungTv, TvStatus, fetchTvInfo } from './src/samsung';
 import { SavedTv, clearTv, loadTv, saveTv } from './src/storage';
 import { wakeOnLan } from './src/wol';
 import { Update, checkForUpdate } from './src/update';
-import { CastDevice, findCastDevices, wakeViaChromecast } from './src/chromecast';
+import { CastTarget, discoverCastDevices, startCastSession } from './src/cast';
 import { findTvByMac } from './src/discover';
 
 const C = {
@@ -158,96 +158,63 @@ function RemoteScreen({
   });
   // Incremented to cancel an in-flight power-on loop (unmount, second tap).
   const wakeRun = useRef(0);
-  const [castPicker, setCastPicker] = useState<CastDevice[] | null>(null);
+  const [castPicker, setCastPicker] = useState<CastTarget[] | null>(null);
   const [castMsg, setCastMsg] = useState('');
-  const pickerShown = useRef(false);
-  const [castAddrOpen, setCastAddrOpen] = useState(false);
-  const [castAddr, setCastAddr] = useState('');
   const tvScanDone = useRef(false);
 
-  // Find the Chromecast: saved address first, then scan the network.
-  // `interactive` shows a picker when several Cast devices are found.
-  const resolveCast = async (interactive: boolean): Promise<string | null> => {
-    const cur = tvDataRef.current;
-    // A sleeping Chromecast is slow to answer, so the saved address is trusted as-is;
-    // the wake call itself retries. Scanning is only for when nothing is saved yet.
-    if (cur.castIp) return cur.castIp;
-    return scanForCast(interactive);
-  };
-
-  const scanForCast = async (interactive: boolean): Promise<string | null> => {
-    const cur = tvDataRef.current;
-    const found = await findCastDevices(cur.ip, [cur.ip, ...(cur.castIp ? [cur.castIp] : [])]);
-    const byName = cur.castName ? found.find((d) => d.name === cur.castName) : undefined;
-    const pick = byName ?? (found.length === 1 ? found[0] : undefined);
+  // Pick this TV's Chromecast: the saved one (by name), else the only one on the Wi-Fi.
+  const resolveCast = async (
+    interactive: boolean,
+    say: (m: string) => void,
+  ): Promise<CastTarget | 'picker' | 'multiple' | null> => {
+    say('Looking for the Chromecast…');
+    const found = await discoverCastDevices();
+    const saved = tvDataRef.current.castName;
+    const pick = (saved && found.find((d) => d.name === saved)) || (found.length === 1 ? found[0] : undefined);
     if (pick) {
-      onUpdateRef.current({ ...tvDataRef.current, castIp: pick.ip, castName: pick.name });
-      return pick.ip;
+      if (pick.name !== saved) onUpdateRef.current({ ...tvDataRef.current, castName: pick.name });
+      return pick;
     }
-    if (interactive && found.length > 1) {
-      pickerShown.current = true;
+    if (found.length > 1) {
+      if (!interactive) return 'multiple';
       setCastPicker(found);
+      return 'picker';
     }
     return null;
   };
 
-  // Wake/switch via the Chromecast. Tries the saved address (with retries), then rescans once.
+  const castTo = async (target: CastTarget, say: (m: string) => void): Promise<string> => {
+    say(`Starting cast on ${target.name}…`);
+    try {
+      await startCastSession(target.deviceId);
+      return 'ok';
+    } catch (e: any) {
+      return String(e?.message ?? e);
+    }
+  };
+
+  // Wake/switch via the Chromecast, using Google's Cast SDK.
   const castWake = async (
     interactive: boolean,
     say: (m: string) => void,
     live: () => boolean = () => true,
-  ): Promise<'ok' | 'none' | 'picker' | string> => {
-    pickerShown.current = false;
-    let ip = await resolveCast(interactive);
-    if (!ip) return pickerShown.current ? 'picker' : 'none';
-    const attempt = async (target: string) => {
-      say(`Sending request to Chromecast at ${target}…`);
-      await wakeViaChromecast(
-        target,
-        (step, n) => step === 'retrying' && say(`Chromecast at ${target} slow to answer. Retrying (attempt ${n})…`),
-        live,
-      );
-    };
-    try {
-      await attempt(ip);
-      return 'ok';
-    } catch (e: any) {
-      if (!live()) return String(e?.message ?? e);
-      say(`No answer from ${ip}. Searching the network for the Chromecast…`);
-      pickerShown.current = false;
-      const newIp = await scanForCast(interactive);
-      if (pickerShown.current) return 'picker';
-      if (!newIp || newIp === ip) return `no answer from ${ip}: ${e?.message ?? e}`;
-      ip = newIp;
-      try {
-        await attempt(ip);
-        return 'ok';
-      } catch (e2: any) {
-        return `no answer from ${ip}: ${e2?.message ?? e2}`;
-      }
-    }
+  ): Promise<string> => {
+    const target = await resolveCast(interactive, say);
+    if (!live()) return 'cancelled';
+    if (target === 'picker' || target === 'multiple') return target;
+    if (!target) return 'none';
+    return castTo(target, say);
   };
 
-  const castSwitch = async (ip: string) => {
-    onUpdateRef.current({ ...tvDataRef.current, castIp: ip });
-    await chromecastButton();
-  };
-
-  const chromecastButton = async () => {
-    setCastMsg('Contacting the Chromecast…');
-    const r = await castWake(true, setCastMsg);
+  const reportCast = (r: string) => {
     if (r === 'ok') {
       setCastMsg('Chromecast accepted. TV switching to HDMI 1…');
       setTimeout(() => setCastMsg((m) => (m.startsWith('Chromecast accepted') ? '' : m)), 5000);
-    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast. Long-press the Chromecast button to enter its address.");
+    } else if (r === 'none') setCastMsg("Couldn't find a Chromecast on your Wi-Fi.");
     else if (r !== 'picker') setCastMsg(`Chromecast didn't respond (${r}).`);
   };
 
-  // First run after this update: quietly find and remember the Chromecast.
-  useEffect(() => {
-    if (!tvDataRef.current.castIp) resolveCast(false).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const chromecastButton = async () => reportCast(await castWake(true, setCastMsg));
 
   useEffect(() => {
     // Keep the MAC (needed for Wake-on-LAN) and name current; setup may have missed them.
@@ -345,7 +312,7 @@ function RemoteScreen({
       const r = await castWake(false, (m) => (cast.step = m), live).catch((e) => String(e?.message ?? e));
       if (!live()) return;
       if (r === 'ok') cast.state = 'ok';
-      else if (r === 'none' || r === 'picker') cast.state = 'none';
+      else if (r === 'none' || r === 'picker' || r === 'multiple') cast.state = 'none';
       else {
         cast.err = r;
         cast.state = 'failed';
@@ -418,7 +385,7 @@ function RemoteScreen({
       } else if (!answered) {
         setWakeMsg(
           cast.state === 'none'
-            ? "TV didn't respond, and no Chromecast was found to wake it. Is the Chromecast powered from the wall?"
+            ? "TV didn't respond, and no Chromecast was found to wake it. Tap Chromecast once to set it up."
             : cast.state === 'failed'
               ? `TV didn't respond. Chromecast error: ${cast.err}`
               : `Sent to ${mac} but the TV didn't respond.`,
@@ -528,12 +495,6 @@ function RemoteScreen({
             buzz('press');
             chromecastButton();
           }}
-          onLongPress={() => {
-            buzz('strong');
-            setCastAddr(tvDataRef.current.castIp || '192.168.1.217');
-            setCastAddrOpen(true);
-          }}
-          delayLongPress={500}
           style={({ pressed }) => [s.btn, s.castBtn, pressed && { backgroundColor: C.btnPressed }]}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -554,56 +515,21 @@ function RemoteScreen({
 
       </ScrollView>
 
-      <Modal visible={castAddrOpen} transparent animationType="fade" onRequestClose={() => setCastAddrOpen(false)}>
-        <View style={s.modalBg}>
-          <View style={s.modal}>
-            <Text style={s.tvName}>Chromecast address</Text>
-            <Text style={s.statusText}>Its IP address on your Wi-Fi, e.g. 192.168.1.217</Text>
-            <TextInput
-              value={castAddr}
-              onChangeText={setCastAddr}
-              keyboardType="numbers-and-punctuation"
-              autoFocus
-              selectTextOnFocus
-              style={s.input}
-            />
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 16 }}>
-              <Pressable onPress={() => setCastAddrOpen(false)} style={{ padding: 8 }}>
-                <Text style={s.statusText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  const ip = castAddr.trim();
-                  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return setCastMsg('That isn\'t a valid IP address.');
-                  setCastAddrOpen(false);
-                  onUpdateRef.current({ ...tvDataRef.current, castIp: ip, castName: undefined });
-                  setCastMsg(`Chromecast address saved: ${ip}. Tap Chromecast to test.`);
-                }}
-                style={{ padding: 8 }}
-              >
-                <Text style={[s.btnText, { color: C.accent }]}>Save</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       <Modal visible={!!castPicker} transparent animationType="fade" onRequestClose={() => setCastPicker(null)}>
         <View style={s.modalBg}>
           <View style={s.modal}>
             <Text style={s.tvName}>Which Chromecast is on this TV?</Text>
             {castPicker?.map((d) => (
               <Pressable
-                key={d.ip}
+                key={d.deviceId}
                 style={s.pickRow}
                 onPress={() => {
                   setCastPicker(null);
-                  onUpdateRef.current({ ...tvDataRef.current, castIp: d.ip, castName: d.name });
-                  castSwitch(d.ip);
+                  onUpdateRef.current({ ...tvDataRef.current, castName: d.name });
+                  castTo(d, setCastMsg).then(reportCast);
                 }}
               >
                 <Text style={s.btnText}>{d.name}</Text>
-                <Text style={s.statusText}>{d.ip}</Text>
               </Pressable>
             ))}
             <Pressable onPress={() => setCastPicker(null)} style={{ alignSelf: 'flex-end', padding: 8 }}>
